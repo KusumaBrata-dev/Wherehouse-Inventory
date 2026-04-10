@@ -1,0 +1,115 @@
+// This is your Prisma schema file
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  PPIC
+  STAFF
+}
+
+enum TransactionType {
+  IN
+  OUT
+  ADJUST
+}
+
+model User {
+  id           Int           @id @default(autoincrement())
+  username     String        @unique
+  passwordHash String        @map("password_hash")
+  name         String
+  role         Role          @default(STAFF)
+  isActive     Boolean       @default(true) @map("is_active")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  transactions Transaction[]
+
+  @@map("users")
+}
+
+model Category {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  createdAt DateTime @default(now()) @map("created_at")
+  items     Item[]
+
+  @@map("categories")
+}
+
+model Item {
+  id            Int              @id @default(autoincrement())
+  name          String
+  sku           String           @unique
+  categoryId    Int?             @map("category_id")
+  unit          String
+  description   String?
+  minStock      Int              @default(0) @map("min_stock")
+  imageUrl      String?          @map("image_url")
+  createdAt     DateTime         @default(now()) @map("created_at")
+  updatedAt     DateTime         @updatedAt @map("updated_at")
+  category      Category?        @relation(fields: [categoryId], references: [id])
+  stock         Stock?
+  rackLocations RackLocation[]
+  transactions  Transaction[]
+
+  @@map("items")
+}
+
+model Stock {
+  id          Int      @id @default(autoincrement())
+  itemId      Int      @unique @map("item_id")
+  quantity    Int      @default(0)
+  lastUpdated DateTime @default(now()) @updatedAt @map("last_updated")
+  item        Item     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@map("stock")
+}
+
+model RackLocation {
+  id        Int      @id @default(autoincrement())
+  itemId    Int      @map("item_id")
+  rackCode  String   @map("rack_code") // e.g. "A-1", "B-3"
+  row       String   // e.g. "A", "B", "C"
+  level     Int      // e.g. 1, 2, 3
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  item      Item     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@map("rack_locations")
+}
+
+model Supplier {
+  id           Int           @id @default(autoincrement())
+  name         String
+  contactName  String?       @map("contact_name")
+  phone        String?
+  email        String?
+  address      String?
+  createdAt    DateTime      @default(now()) @map("created_at")
+  transactions Transaction[]
+
+  @@map("suppliers")
+}
+
+model Transaction {
+  id          Int             @id @default(autoincrement())
+  itemId      Int             @map("item_id")
+  type        TransactionType
+  quantity    Int
+  referenceNo String?         @map("reference_no")
+  supplierId  Int?            @map("supplier_id")
+  userId      Int             @map("user_id")
+  note        String?
+  date        DateTime        @default(now())
+  createdAt   DateTime        @default(now()) @map("created_at")
+  item        Item            @relation(fields: [itemId], references: [id])
+  supplier    Supplier?       @relation(fields: [supplierId], references: [id])
+  user        User            @relation(fields: [userId], references: [id])
+
+  @@map("transactions")
+}
