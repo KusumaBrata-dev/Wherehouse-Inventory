@@ -68,6 +68,7 @@ export const deleteBox      = (id)      => api.delete(`/locations/boxes/${id}`).
 export const searchGlobal  = (q)       => api.get('/locations/search', { params: { q } }).then(r => r.data);
 export const getBoxInventory = ()      => api.get('/locations/box-inventory').then(r => r.data);
 export const getLocationQR = (type, id) => `/api/locations/qr?type=${type}&id=${id}`;
+export const getOccupancyStats = ()    => api.get('/locations/stats/occupancy').then(r => r.data);
 
 // ── Boxes ────────────────────────────────────────────────────────────────
 export const updateBox = (id, data) => api.put('/locations/boxes/' + id, data).then(r => r.data);
@@ -90,5 +91,8 @@ export const getRack   = (productId)  => api.get(`/rack/${productId}`).then(r =>
 export const createRack = (data)   => api.post('/rack', data).then(r => r.data);
 export const updateRack = (id, d)  => api.put(`/rack/${id}`, d).then(r => r.data);
 export const deleteRack = (id)     => api.delete(`/rack/${id}`).then(r => r.data);
+
+// ── Direct Inbound (no PO) ────────────────────────────────────────────────
+export const directInbound = (data) => api.post('/locations/inbound', data).then(r => r.data);
 
 export default api;

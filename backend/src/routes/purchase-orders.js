@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import prisma from '../lib/prisma.js';
-import { authenticate } from '../middleware/auth.js';
+import { authenticate, requireAdminOrPPIC } from '../middleware/auth.js';
+import { validate, receivePOSchema } from '../validations/wms.js';
 
 export const purchaseOrdersRouter = Router();
 
@@ -42,8 +43,8 @@ purchaseOrdersRouter.get('/:id', async (req, res, next) => {
   }
 });
 
-// POST /api/purchase-orders
-purchaseOrdersRouter.post('/', async (req, res, next) => {
+// POST /api/purchase-orders — Restricted to Admin/PPIC
+purchaseOrdersRouter.post('/', requireAdminOrPPIC, async (req, res, next) => {
   try {
     const { poNumber, supplierId, notes, products } = req.body;
     if (!poNumber || !supplierId || !products || products.length === 0) {
@@ -76,11 +77,11 @@ purchaseOrdersRouter.post('/', async (req, res, next) => {
 });
 
 // POST /api/purchase-orders/:id/receive
-// This is the core "Inbound" logic
-purchaseOrdersRouter.post('/:id/receive', async (req, res, next) => {
+// This is the core "Inbound" logic (receiving items to warehouse)
+purchaseOrdersRouter.post('/:id/receive', requireAdminOrPPIC, validate(receivePOSchema), async (req, res, next) => {
   try {
     const poId = parseInt(req.params.id);
-    const { products: receivedProducts } = req.body; // Array of { productId, quantity, boxId }
+    const { products: receivedProducts } = req.validData; // Array of { productId, quantity, boxId, lotNumber } from Zod
 
     const po = await prisma.purchaseOrder.findUnique({
       where: { id: poId },
@@ -95,8 +96,13 @@ purchaseOrdersRouter.post('/:id/receive', async (req, res, next) => {
         const pid = parseInt(rx.productId);
         const qty = parseInt(rx.quantity);
         const bid = parseInt(rx.boxId);
+        const lot = rx.lotNumber || '';
 
-        // 1. Create Transaction (IN)
+        // Validate Box exists
+        const box = await tx.box.findUnique({ where: { id: bid } });
+        if (!box) throw { status: 404, message: `Box ID ${bid} tidak ditemukan.` };
+
+        // 1. Create Transaction (IN) — logs arrival at INCOMING
         await tx.transaction.create({
           data: {
             productId: pid,
@@ -105,7 +111,8 @@ purchaseOrdersRouter.post('/:id/receive', async (req, res, next) => {
             userId: req.user.id,
             boxId: bid,
             purchaseOrderId: poId,
-            note: `Received from PO ${po.poNumber}`,
+            toLocationCode: 'INCOMING',
+            note: `Received from PO ${po.poNumber} → Incoming Area`,
           },
         });
 
@@ -118,9 +125,15 @@ purchaseOrdersRouter.post('/:id/receive', async (req, res, next) => {
 
         // 3. Update BoxProduct (Physical Location)
         await tx.boxProduct.upsert({
-          where: { boxId_productId_lotNumber: { boxId: bid, productId: pid, lotNumber: null } },
+          where: { boxId_productId_lotNumber: { boxId: bid, productId: pid, lotNumber: lot } },
           update: { quantity: { increment: qty } },
-          create: { boxId: bid, productId: pid, quantity: qty },
+          create: { boxId: bid, productId: pid, quantity: qty, lotNumber: lot },
+        });
+
+        // 4. Mark Box as RECEIVED (in Incoming Area staging)
+        await tx.box.update({
+          where: { id: bid },
+          data: { status: 'RECEIVED' },
         });
       }
 
@@ -133,12 +146,13 @@ purchaseOrdersRouter.post('/:id/receive', async (req, res, next) => {
 
     res.json({ message: 'PO received successfully and stock updated' });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
     next(err);
   }
 });
 
 // PUT /api/purchase-orders/:id/cancel
-purchaseOrdersRouter.put('/:id/cancel', async (req, res, next) => {
+purchaseOrdersRouter.put('/:id/cancel', requireAdminOrPPIC, async (req, res, next) => {
   try {
     const { id } = req.params;
     const po = await prisma.purchaseOrder.findUnique({ where: { id: parseInt(id) } });

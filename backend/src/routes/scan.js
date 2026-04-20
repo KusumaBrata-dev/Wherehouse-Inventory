@@ -33,14 +33,168 @@ async function getFullPath(rackLevelId) {
     section: sectionNum,
     level: levelNum,
     fullCode: `${rackLetter}${sectionNum}-LVL${levelNum}`,
-    fullPath: `${floorName} > Rak ${rackLetter}${sectionNum} > Level ${levelNum}`
+    fullPath: `${floorName} > Rak ${rackLetter} > Baris ${rackLetter}${sectionNum} > Level ${levelNum}`
   };
 }
 
-// GET /api/scan/:code — Lookup product or box by SKU/Code
+// Helper to build level response (used by both resolvers)
+async function buildLevelResponse(level) {
+  const pallets = await prisma.pallet.findMany({
+    where: { rackLevelId: level.id },
+    include: {
+      boxes: {
+        include: { boxProducts: { include: { product: true } } }
+      }
+    }
+  });
+
+  // Aggregate products across all boxes
+  const productMap = {};
+  pallets.forEach(p => {
+    p.boxes.forEach(b => {
+      b.boxProducts.forEach(bp => {
+        if (!productMap[bp.productId]) {
+          productMap[bp.productId] = {
+            productId: bp.product.id,
+            name: bp.product.name,
+            sku: bp.product.sku,
+            unit: bp.product.unit,
+            quantity: 0
+          };
+        }
+        productMap[bp.productId].quantity += bp.quantity;
+      });
+    });
+  });
+
+  return {
+    type: 'level',
+    id: level.id,
+    code: level.code,
+    number: level.number,
+    section: level.section,
+    floorName: level.section.rack.floor.name,
+    palletCount: pallets.length,
+    totalBoxes: pallets.reduce((acc, p) => acc + p.boxes.length, 0),
+    pallets: pallets.map(p => ({
+      id: p.id, code: p.code, name: p.name, boxCount: p.boxes.length
+    })),
+    products: Object.values(productMap)
+  };
+}
+
+async function buildColumnResponse(section) {
+  const levels = await prisma.rackLevel.findMany({
+    where: { sectionId: section.id },
+    orderBy: { number: 'asc' },
+    include: { pallets: true }
+  });
+
+  return {
+    type: 'column',
+    id: section.id,
+    code: section.code,
+    rackLetter: section.rack.letter,
+    columnNumber: section.number,
+    floorName: section.rack.floor.name,
+    levels: levels.map(l => ({
+      id: l.id,
+      number: l.number,
+      levelCode: l.code,
+      palletCount: l.pallets.length,
+      isEmpty: l.pallets.length === 0
+    })),
+    totalPallets: levels.reduce((acc, l) => acc + l.pallets.length, 0)
+  };
+}
+
+async function buildRackResponse(rack) {
+  const sections = await prisma.section.findMany({
+    where: { rackId: rack.id },
+    orderBy: { number: 'asc' },
+    include: { levels: { include: { pallets: true } } }
+  });
+
+  let totalPallets = 0;
+  const columns = sections.map(s => {
+    const levels = s.levels.map(l => {
+      totalPallets += l.pallets.length;
+      return {
+        id: l.id,
+        number: l.number,
+        levelCode: l.code,
+        palletCount: l.pallets.length,
+        isEmpty: l.pallets.length === 0
+      };
+    }).sort((a, b) => a.number - b.number);
+    return {
+      id: s.id,
+      number: s.number,
+      code: s.code,
+      levels
+    };
+  });
+
+  return {
+    type: 'rack',
+    id: rack.id,
+    letter: rack.letter,
+    floorName: rack.floor.name,
+    columns,
+    totalPallets
+  };
+}
+
+// GET /api/scan/:code — Lookup product, box, pallet, or location by code
 scanRouter.get('/:code', async (req, res, next) => {
   try {
     const { code } = req.params;
+
+    let scanType = null;
+    let scanCode = code.toUpperCase();
+    if (scanCode.includes('|')) {
+      const parts = scanCode.split('|');
+      scanType = parts[0];
+      scanCode = parts.slice(1).join('|');
+    }
+
+    // 0a. Try parsing as LEVEL
+    if (scanType === 'LEVEL' || (!scanType && scanCode.split('-').length === 4)) {
+      const level = await prisma.rackLevel.findUnique({
+        where: { code: scanCode },
+        include: { section: { include: { rack: { include: { floor: true } } } } }
+      });
+      if (level) return res.json(await buildLevelResponse(level));
+    }
+
+    // 0b. Try parsing as COLUMN
+    if (scanType === 'COLUMN' || (!scanType && scanCode.split('-').length === 3)) {
+      const section = await prisma.section.findUnique({
+        where: { code: scanCode },
+        include: { rack: { include: { floor: true } }, levels: true }
+      });
+      if (section) return res.json(await buildColumnResponse(section));
+    }
+
+    // 0c. Try parsing as RACK
+    if (scanType === 'RACK' || (!scanType && scanCode.split('-').length === 2)) {
+      const section = await prisma.section.findFirst({
+        where: { code: { startsWith: scanCode + '-' } },
+        include: { rack: { include: { floor: true } } }
+      });
+      if (section && section.rack) return res.json(await buildRackResponse(section.rack));
+    }
+
+    // 0d. Fallback exact match (e.g., INCOMING)
+    const levelByCode = await prisma.rackLevel.findUnique({
+      where: { code: scanCode },
+      include: {
+        section: { include: { rack: { include: { floor: true } } } }
+      }
+    });
+    if (levelByCode) {
+      return res.json(await buildLevelResponse(levelByCode));
+    }
 
     // 1. Try finding a Product
     const product = await prisma.product.findUnique({
@@ -272,18 +426,24 @@ scanRouter.get('/:code', async (req, res, next) => {
           where: { id: numericId }, 
           include: { 
             section: { include: { rack: { include: { floor: true } } } },
-            pallets: { include: { boxes: { include: { boxProducts: true } } } }
+            pallets: { include: { boxes: true } }
           } 
         });
-        if (l) return res.json({ 
-          type: 'level', 
-          id: l.id, 
-          number: l.number, 
-          section: l.section,
-          pallets: l.pallets.map(p => ({
-            id: p.id, code: p.code, name: p.name, boxCount: p.boxes.length
-          }))
-        });
+        if (l) {
+          const totalBoxes = l.pallets.reduce((acc, p) => acc + p.boxes.length, 0);
+          return res.json({ 
+            type: 'level', 
+            id: l.id, 
+            number: l.number, 
+            section: l.section,
+            floorName: l.section.rack.floor.name,
+            palletCount: l.pallets.length,
+            totalBoxes,
+            pallets: l.pallets.map(p => ({
+              id: p.id, code: p.code, name: p.name, boxCount: p.boxes.length
+            }))
+          });
+        }
       } else if (type === 'PAL') {
         const p = await prisma.pallet.findUnique({ 
           where: { id: numericId }, 

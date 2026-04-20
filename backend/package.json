@@ -11,7 +11,7 @@
     "db:migrate": "prisma migrate dev --schema=../prisma/schema.prisma",
     "db:push": "prisma db push --schema=../prisma/schema.prisma",
     "db:studio": "prisma studio --port 49152 --browser none --config ../prisma.config.ts",
-    "db:seed": "node src/seeds/seed.js",
+    "db:seed": "node src/seeds/restore-hierarchy.js",
     "db:clear-products": "node src/seeds/clear-products.js"
   },
   "keywords": [],
@@ -30,7 +30,8 @@
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.1.1",
     "pg": "^8.20.0",
-    "qrcode": "^1.5.4"
+    "qrcode": "^1.5.4",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "nodemon": "^3.1.14",

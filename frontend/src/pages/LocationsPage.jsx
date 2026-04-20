@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { useParams, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import api from "../services/api";
 import toast from "react-hot-toast";
@@ -19,11 +20,14 @@ import {
   Trash2,
   Users,
   UserPlus,
+  PieChart,
 } from "lucide-react";
 import { createTransaction } from "../services/api";
 import RelocatePalletModal from "../components/RelocatePalletModal";
 import { useAuth } from "../context/AuthContext";
 import QRModal from "../components/QRModal";
+import CreatePalletModal from "../components/CreatePalletModal";
+import CreateBoxModal from "../components/CreateBoxModal";
 
 // ─── Component: QR Preview Button ──────────────────────────────────────────
 function QRButton({ type, id, name, size = 16 }) {
@@ -42,239 +46,21 @@ function QRButton({ type, id, name, size = 16 }) {
       >
         <QrCode size={size} />
       </button>
-      {show && (
-        <QRModal
-          type={type}
-          id={id}
-          name={name}
-          onClose={() => setShow(false)}
-        />
-      )}
+      {show &&
+        createPortal(
+          <QRModal
+            type={type}
+            id={id}
+            name={name}
+            onClose={() => setShow(false)}
+          />,
+          document.body
+        )}
     </>
   );
 }
 
 // ─── Modal: Create Pallet ──────────────────────────────────────────────────
-function CreatePalletModal({ levelId, onClose, onCreated }) {
-  const [form, setForm] = useState({ name: "", code: "" });
-  const [loading, setLoading] = useState(false);
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!form.name) return toast.error("Nama palet wajib diisi");
-    const code = form.code || `PAL-${Date.now().toString().slice(-6)}`;
-    setLoading(true);
-    try {
-      await api.post("/locations/pallets", {
-        ...form,
-        code,
-        rackLevelId: levelId,
-      });
-      toast.success("Palet berhasil dibuat");
-      onCreated();
-      onClose();
-    } catch (err) {
-      toast.error("Gagal membuat palet");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div
-        className="modal animate-up"
-        onClick={(e) => e.stopPropagation()}
-        style={{ maxWidth: 400 }}
-      >
-        <div className="modal-header">
-          <h3 className="modal-title">Tambah Pallet Baru</h3>
-          <button className="btn-icon" onClick={onClose}>
-            <X size={18} />
-          </button>
-        </div>
-        <form onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label className="form-label">Nama Palet</label>
-            <input
-              className="form-control"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              placeholder="Contoh: Pallet Sparepart A"
-              autoFocus
-            />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Kode / Barcode</label>
-            <input
-              className="form-control font-mono"
-              value={form.code}
-              onChange={(e) => setForm({ ...form, code: e.target.value })}
-              placeholder="Kosongkan untuk otomatis"
-            />
-          </div>
-          <div className="modal-footer" style={{ padding: 0, marginTop: 24 }}>
-            <button
-              type="button"
-              className="btn btn-ghost"
-              onClick={onClose}
-              style={{ flex: 1 }}
-            >
-              Batal
-            </button>
-            <button
-              type="submit"
-              className="btn btn-primary"
-              style={{ flex: 2 }}
-              disabled={loading}
-            >
-              {loading ? <div className="spinner" /> : "Buat Pallet"}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-// ─── Modal: Create Box ──────────────────────────────────────────────────
-function CreateBoxModal({ palletId, onClose, onCreated }) {
-  const [form, setForm] = useState({ name: "", code: "" });
-  const [loading, setLoading] = useState(false);
-  const [qty, setQty] = useState(1);
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!form.name) return toast.error("Nama box wajib diisi");
-    if (qty < 1) return toast.error("Quantity harus lebih dari 0");
-
-    setLoading(true);
-    try {
-      // 1. Resolve or Create the Physical Product automatically based on Box Name
-      let targetProductId;
-      const cleanProductName = form.name.replace(/^Box\s+/i, "").trim() || form.name;
-      
-      const matchReq = await api.get(`/products?search=${encodeURIComponent(cleanProductName)}`);
-      const match = matchReq.data.find(i => i.name.toLowerCase() === cleanProductName.toLowerCase());
-      
-      if (match) {
-        targetProductId = match.id;
-      } else {
-        const newProduct = await api.post("/products", {
-          name: cleanProductName,
-          sku: `SKU-${Date.now().toString().slice(-6)}`,
-          unit: "pcs"
-        });
-        targetProductId = newProduct.data.id;
-      }
-
-      // 2. Create the Box
-      const code = form.code || `BOX-${Date.now().toString().slice(-6)}`;
-      const boxRes = await api.post("/locations/boxes", { ...form, code, palletId });
-      const newBox = boxRes.data;
-
-      // 3. Add Product Quantity to Box
-      await createTransaction({
-        productId: targetProductId,
-        type: "IN",
-        quantity: parseInt(qty),
-        boxId: newBox.id,
-        note: `Initial stok saat pembuatan Box ${newBox.code}`,
-      });
-
-      toast.success(`Box berhasil dibuat dan diisi ${qty} unit`);
-      onCreated();
-      onClose();
-    } catch (err) {
-      toast.error("Gagal membuat box atau memproses stok");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div
-        className="modal animate-up scroll-styled"
-        onClick={(e) => e.stopPropagation()}
-        style={{ maxWidth: 400, maxHeight: "90vh", overflowY: "auto" }}
-      >
-        <div className="modal-header">
-          <h3 className="modal-title">Buat Box & Isi Quantity</h3>
-          <button className="btn-icon" onClick={onClose}>
-            <X size={18} />
-          </button>
-        </div>
-        <form onSubmit={handleSubmit} style={{ paddingBottom: 20 }}>
-          
-          {/* BOX TITLE */}
-          <div className="form-group">
-            <label className="form-label">Nama Box</label>
-            <input
-              className="form-control"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              placeholder="Contoh: Box LCD TN35"
-              autoFocus
-              required
-            />
-          </div>
-
-          {/* BOX CODE */}
-          <div className="form-group">
-            <label className="form-label">Kode / QR Code (Opsional)</label>
-            <input
-              className="form-control font-mono"
-              value={form.code}
-              onChange={(e) => setForm({ ...form, code: e.target.value })}
-              placeholder="Kosongkan untuk kode otomatis"
-            />
-          </div>
-
-          {/* SMALLER QUANTITY INPUT */}
-          <div style={{ marginTop: 24, padding: "16px", background: "rgba(255,255,255,0.03)", borderRadius: 12, border: "1px solid var(--border)" }}>
-             <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12, textAlign: "center", fontWeight: 600 }}>JUMLAH QUANTITY</div>
-             <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 16 }}>
-                <button type="button" className="btn btn-icon" style={{ width: 40, height: 40, fontSize: 24, background: "var(--danger-bg)", color: "var(--danger)", border: "none" }} onClick={() => setQty(q => Math.max(1, q - 1))}>
-                   <Minus size={20} />
-                </button>
-                <input 
-                   type="number" 
-                   className="form-control" 
-                   value={qty} 
-                   onChange={e => setQty(parseInt(e.target.value) || 0)}
-                   min={1}
-                   style={{ width: 80, height: 50, fontSize: 24, fontWeight: 800, textAlign: "center" }}
-                />
-                <button type="button" className="btn btn-icon" style={{ width: 40, height: 40, fontSize: 24, background: "var(--success-bg)", color: "var(--success)", border: "none" }} onClick={() => setQty(q => q + 1)}>
-                   <Plus size={20} />
-                </button>
-             </div>
-          </div>
-
-          <div className="modal-footer" style={{ padding: 0, marginTop: 24 }}>
-            <button
-              type="button"
-              className="btn btn-ghost"
-              onClick={onClose}
-              style={{ flex: 1 }}
-            >
-              Batal
-            </button>
-            <button
-              type="submit"
-              className="btn btn-primary"
-              style={{ flex: 2 }}
-              disabled={loading || !form.name || qty < 1}
-            >
-              {loading ? <div className="spinner" /> : "Buat Box & Simpan"}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
 
 // ─── Modal: Box Product Edit ──────────────────────────────────────────────────
 function BoxProductEditModal({ bi, boxId, boxCode, onClose, onSaved }) {
@@ -883,6 +669,11 @@ export default function LocationsPage() {
   const [editingProduct, setEditingProduct] = useState(null);
   const [addingToBox, setAddingToBox] = useState(null);
 
+  // ─── ADMIN MOVE MODE STATES ───
+  const [moveModeActive, setMoveModeActive] = useState(false);
+  const [selectedMovePallet, setSelectedMovePallet] = useState(null);
+  const isAdmin = user?.role === "ADMIN";
+
   const handleDeletePallet = async (p) => {
     if (
       !window.confirm(
@@ -1325,9 +1116,11 @@ export default function LocationsPage() {
                     ? floor.name
                     : view === "rack"
                       ? `Rak-${selRack.letter}`
-                      : view === "level"
-                        ? `L${selLevel.number}`
-                        : selPallet?.name || selBox?.name || "Loc"
+                      : view === "section"
+                        ? `Grid-${selRack.letter}${selSection.number}`
+                        : view === "level"
+                          ? `L${selLevel.number}`
+                          : selPallet?.name || selBox?.name || "Loc"
                 }
                 size={22}
               />
@@ -1335,6 +1128,19 @@ export default function LocationsPage() {
           </div>
         </div>
         <div style={{ display: "flex", gap: 12 }}>
+          {view === "level" && isAdmin && (
+            <button
+              className={`btn ${moveModeActive ? "btn-danger" : "btn-ghost"}`}
+              onClick={() => {
+                setMoveModeActive(!moveModeActive);
+                setSelectedMovePallet(null);
+                if (!moveModeActive) toast("Mode Pindah Aktif: Pilih Palet lalu pilih Level tujuan", { icon: "📦" });
+              }}
+              style={{ fontWeight: 700 }}
+            >
+              <ArrowRightLeft size={18} /> {moveModeActive ? "Batalkan Pindah" : "Mode Pindah"}
+            </button>
+          )}
           {canDelete && (
             <>
               {view === "floor" && <button className="btn btn-primary" onClick={() => setShowAddRack(true)}><Plus size={18} /> Tambah Rak</button>}
@@ -1409,8 +1215,30 @@ export default function LocationsPage() {
                   color: "var(--text-white)",
                 }}
               >
-                Rak Baris {r.letter}
+                Rak {r.letter}
               </div>
+              {/* Occupancy Logic */}
+              {(() => {
+                const totalLevels = r.sections?.reduce((acc, s) => acc + (s.levels?.length || 0), 0) || 0;
+                const usedLevels = r.sections?.reduce((acc, s) => acc + (s.levels?.filter(l => l.pallets?.length > 0).length || 0), 0) || 0;
+                const occPercent = totalLevels > 0 ? Math.round((usedLevels / totalLevels) * 100) : 0;
+                const color = occPercent > 90 ? "var(--danger)" : occPercent > 70 ? "var(--warning)" : "var(--success)";
+                
+                return (
+                  <div style={{ marginTop: 12, width: "100%" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><PieChart size={10} /> Okupansi</span>
+                      <span style={{ fontWeight: 700, color }}>{occPercent}%</span>
+                    </div>
+                    <div style={{ height: 6, background: "rgba(255,255,255,0.05)", borderRadius: 3, overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${occPercent}%`, background: color, transition: "width 0.5s ease" }} />
+                    </div>
+                    <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 6, opacity: 0.6 }}>
+                      {usedLevels} / {totalLevels} Level Terisi
+                    </div>
+                  </div>
+                );
+              })()}
               <div
                 style={{
                   fontSize: 13,
@@ -1418,7 +1246,7 @@ export default function LocationsPage() {
                   marginBottom: 12,
                 }}
               >
-                {r.sections.length} Kolom Grid
+                {r.sections.length} Baris
               </div>
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                 <QRButton type="rack" id={r.id} name={`Rak-${r.letter}`} size={20} />
@@ -1466,11 +1294,11 @@ export default function LocationsPage() {
                 {selRack.letter}
                 {s.number}
               </div>
-              <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 16 }}>Kolom {s.number}</div>
+              <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 16 }}>Baris {s.number}</div>
               <div style={{ display: "flex", gap: 8, justifyContent: "center", alignItems: "center" }}>
-                <QRButton type="section" id={s.id} name={`Grid-${selRack.letter}${s.number}`} size={18} />
+                <QRButton type="section" id={s.id} name={`Baris-${selRack.letter}${s.number}`} size={18} />
                 {canDelete && (
-                  <button className="btn btn-ghost btn-icon text-danger" onClick={(e) => { e.stopPropagation(); handleDeleteSection(s); }} title="Hapus Kolom"><Trash2 size={16} /></button>
+                  <button className="btn btn-ghost btn-icon text-danger" onClick={(e) => { e.stopPropagation(); handleDeleteSection(s); }} title="Hapus Baris"><Trash2 size={16} /></button>
                 )}
               </div>
             </div>
@@ -1520,8 +1348,8 @@ export default function LocationsPage() {
                   justifyContent: "space-between",
                   alignItems: "center",
                   padding: "24px",
-                  background: moveMode && sourcePallet?.rackLevelId === l.id ? "var(--primary-glow)" : "var(--bg-surface)",
-                  borderLeft: moveMode && sourcePallet?.rackLevelId === l.id ? "12px solid var(--primary)" : (moveMode && sourcePallet ? "6px dashed var(--warning)" : "6px solid var(--primary)"),
+                  background: moveModeActive && selectedMovePallet?.rackLevelId === l.id ? "var(--primary-glow)" : (moveModeActive && selectedMovePallet && selectedMovePallet.rackLevelId !== l.id ? "rgba(255,200,0,0.05)" : "var(--bg-surface)"),
+                  borderLeft: moveModeActive && selectedMovePallet?.rackLevelId === l.id ? "12px solid var(--primary)" : (moveModeActive && selectedMovePallet ? "6px dashed var(--warning)" : "6px solid var(--primary)"),
                   cursor: "pointer",
                   position: "relative",
                   overflow: "hidden",
@@ -1530,28 +1358,28 @@ export default function LocationsPage() {
                   minHeight: 110,
                   width: "100%",
                   transition: "all 0.2s ease",
-                  transform: moveMode && sourcePallet?.rackLevelId === l.id ? "scale(1.02)" : "scale(1)"
+                  transform: moveModeActive && selectedMovePallet?.rackLevelId === l.id ? "scale(1.02)" : "scale(1)"
                 }}
                 onClick={async () => {
-                   if (moveMode) {
-                      if (!sourcePallet) {
+                   if (moveModeActive) {
+                      if (!selectedMovePallet) {
                          const p = l.pallets[0];
                          if (!p) return toast("Pilih level yang ada paletnya", { icon: "❗" });
-                         setSourcePallet(p);
+                         setSelectedMovePallet(p);
                          toast(`Palet "${p.name}" dipilih. Klik Level tujuan.`, { icon: "🎯" });
                       } else {
-                         if (sourcePallet.rackLevelId === l.id) {
-                            setSourcePallet(null);
-                            return toast("Pindahan dibatalkan");
+                         if (selectedMovePallet.rackLevelId === l.id) {
+                            setSelectedMovePallet(null);
+                            return toast("Pilihan dibatalkan");
                          }
                          try {
-                            const loading = toast.loading("Memindahkan palet...");
-                            await api.patch(`/locations/pallets/${sourcePallet.id}/move`, { newLevelId: l.id });
-                            toast.dismiss(loading);
-                            toast.success(`Palet "${sourcePallet.name}" berhasil dipindah ke Level ${l.number}`);
-                            setSourcePallet(null);
-                            setMoveMode(false);
-                            fetchFloor(); // Refresh data
+                            const loadingToast = toast.loading("Memindahkan palet...");
+                            await api.patch(`/locations/pallets/${selectedMovePallet.id}/move`, { newLevelId: l.id });
+                            toast.dismiss(loadingToast);
+                            toast.success(`Palet "${selectedMovePallet.name}" berhasil dipindah ke Level ${l.number}`);
+                            setSelectedMovePallet(null);
+                            setMoveModeActive(false);
+                            fetchFloorData();
                          } catch (err) {
                             toast.error("Gagal memindahkan palet");
                          }

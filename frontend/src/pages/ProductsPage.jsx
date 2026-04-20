@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
 import { createProduct, updateProduct, deleteProduct, exportProductsExcel } from '../services/api';
 import api from '../services/api';
@@ -14,7 +15,10 @@ function QRButton({ type, id, name, size = 16 }) {
       <button className="btn btn-primary btn-icon btn-sm" onClick={() => setShow(true)} title="Preview QR">
         <QrCode size={size} />
       </button>
-      {show && <QRModal type={type} id={id} name={name} onClose={() => setShow(false)} />}
+      {show && createPortal(
+        <QRModal type={type} id={id} name={name} onClose={() => setShow(false)} />,
+        document.body
+      )}
     </>
   );
 }
@@ -103,143 +107,190 @@ function ProductModal({ product, onClose, onSaved }) {
   );
 }
 
+// ─── Main Component: Products Page ──────────────────────────────────────────
 export default function ProductsPage() {
+  const [products, setProducts] = useState([]);
+  const [categories, setCategories] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [search, setSearch] = useState(searchParams.get('q') || '');
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+
+  const [modal, setModal] = useState({ show: false, product: null });
   const { user } = useAuth();
   const isAdmin = user?.role === 'ADMIN';
 
-  const [searchParams, setSearchParams] = useSearchParams();
-  const search = searchParams.get("s") || "";
-  const [products, setProducts] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [modalProduct, setModalProduct] = useState(null);
-
-  const setSearch = (s) => {
-    setSearchParams(prev => {
-      if (!s) prev.delete("s");
-      else prev.set("s", s);
-      return prev;
-    }, { replace: true });
-  };
-
-  const loadProducts = useCallback(async () => {
+  const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.get('/products');
-      setProducts(res.data);
+      const [pRes, cRes] = await Promise.all([
+        api.get('/products', { params: { search, page, limit: 25 } }),
+        api.get('/categories')
+      ]);
+      setProducts(pRes.data.products || []);
+      setTotalCount(pRes.data.pagination?.total || 0);
+      setTotalPages(pRes.data.pagination?.totalPages || 1);
+      setCategories(cRes.data);
     } catch (err) {
-      toast.error('Gagal memuat master produk');
+      toast.error('Gagal memuat data');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [search, page]);
 
-  useEffect(() => { loadProducts(); }, [loadProducts]);
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
 
-  const handleDeleteProduct = async (product) => {
-    if (!window.confirm(`Hapus Master Produk "${product.name}" (SKU: ${product.sku})?\nPERINGATAN: Produk tidak dapat dihapus jika masih ada stok aktif.`)) return;
+  const handleSearch = (e) => {
+    setSearch(e.target.value);
+    setPage(1); // Reset to first page on search
+  };
+
+  const handleDelete = async (id) => {
+    if (!window.confirm('Hapus produk ini? Semua stok terkait juga akan terpengaruh.')) return;
     try {
-      await deleteProduct(product.id);
-      toast.success('Master Produk berhasil dihapus');
-      loadProducts();
+      await deleteProduct(id);
+      toast.success('Produk dihapus');
+      fetchData();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Gagal menghapus produk');
+      toast.error('Gagal menghapus produk');
     }
   };
 
-  const filteredProducts = products.filter(it => 
-    it.name.toLowerCase().includes(search.toLowerCase()) || 
-    it.sku.toLowerCase().includes(search.toLowerCase())
-  );
-
   return (
-    <div className="page-container animate-fade" style={{ maxWidth: 1200, margin: '0 auto' }}>
-      <div className="page-header" style={{ marginBottom: 32 }}>
-        <div>
-          <h1>Master Data Produk</h1>
-          <p>Database utama seluruh produk dan entitas gudang</p>
+    <div className="page-container animate-fade">
+      <div className="page-header-wms" style={{ marginBottom: 24 }}>
+        <div className="top-title">
+          <h1 style={{ fontSize: 24, fontWeight: 800, color: 'var(--text-white)' }}>Master Data Produk</h1>
+          <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>Kelola informasi produk dan SKU pusat</p>
         </div>
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <button className="btn btn-primary" onClick={() => setModalProduct({})}>
-            <Plus size={18} /> Tambah Master Produk
-          </button>
+        <div style={{ display: 'flex', gap: 12 }}>
+           <button className="btn btn-ghost" onClick={() => exportProductsExcel()}>
+              <HardDrive size={18} style={{ marginRight: 8 }} /> Export Excel
+           </button>
+           {isAdmin && (
+             <button className="btn btn-primary" onClick={() => setModal({ show: true, product: null })}>
+               <Plus size={18} style={{ marginRight: 8 }} /> Tambah Produk
+             </button>
+           )}
         </div>
       </div>
 
-      <div className="card glass flex" style={{ padding: 16, marginBottom: 24, alignItems: 'center' }}>
-        <div className="search-box" style={{ flex: 1 }}>
+      <div className="card glass" style={{ padding: 20, marginBottom: 20 }}>
+        <div className="search-box">
           <Search size={18} />
-          <input
-            type="text"
-            className="form-control"
-            placeholder="Cari berdasarkan Nama atau Kode SKU..."
+          <input 
+            type="text" 
+            className="form-control" 
+            placeholder="Cari berdasarkan Nama atau SKU..." 
             value={search}
-            onChange={e => setSearch(e.target.value)}
+            onChange={handleSearch}
           />
         </div>
       </div>
 
       <div className="card glass" style={{ padding: 0, overflow: 'hidden' }}>
-        <div className="table-container" style={{ margin: 0, border: 'none' }}>
-           <table style={{ borderCollapse: 'collapse', width: '100%' }}>
-             <thead style={{ background: 'rgba(255,255,255,0.03)' }}>
-               <tr>
-                 <th style={{ padding: '16px 24px' }}>Identifikasi Produk</th>
-                 <th>Satuan</th>
-                 <th>Batas Minimum Stok</th>
-                 <th style={{ textAlign: 'right', paddingRight: 24 }}>Tindakan</th>
-               </tr>
-             </thead>
-             <tbody>
-               {loading ? (
-                 Array(5).fill(0).map((_, i) => (
-                   <tr key={i}><td colSpan={4} style={{ padding: 20 }}><div className="skeleton-line" /></td></tr>
-                 ))
-               ) : filteredProducts.length === 0 ? (
-                 <tr>
-                   <td colSpan={4} style={{ padding: 80, textAlign: 'center', opacity: 0.5 }}>
-                      <HardDrive size={48} style={{ margin: '0 auto 16px' }} />
-                      <p>Database master produk masih kosong.</p>
+        <div className="table-container" style={{ border: 'none', margin: 0 }}>
+          <table>
+            <thead>
+              <tr>
+                <th style={{ paddingLeft: 24 }}>Info Produk</th>
+                <th>Kategori</th>
+                <th>Satuan</th>
+                <th style={{ textAlign: 'center' }}>Min. Stok</th>
+                <th style={{ textAlign: 'right', paddingRight: 24 }}>Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                Array(5).fill(0).map((_, i) => (
+                  <tr key={i}><td colSpan={5} style={{ padding: 20 }}><div className="skeleton-line" /></td></tr>
+                ))
+              ) : products.length === 0 ? (
+                <tr>
+                   <td colSpan={5} style={{ padding: 60, textAlign: 'center', opacity: 0.5 }}>
+                      <Package size={40} style={{ margin: '0 auto 12px' }} />
+                      <p>Tidak ada data produk.</p>
                    </td>
-                 </tr>
-               ) : filteredProducts.map(product => (
-                 <tr key={product.id} className="hover-row" style={{ borderBottom: '1px solid var(--border)' }}>
-                    <td style={{ padding: '16px 24px' }}>
-                       <div style={{ fontWeight: 700, fontSize: 15, color: 'var(--text-white)' }}>{product.name}</div>
-                       <div className="flex" style={{ gap: 8, marginTop: 4 }}>
-                         <span className="badge badge-gray font-mono">{product.sku}</span>
-                         {product.category?.name && <span className="badge badge-primary" style={{ opacity: 0.8 }}>{product.category.name}</span>}
-                       </div>
-                    </td>
-                    <td style={{ fontWeight: 600 }}>{product.unit}</td>
-                    <td>
-                       {product.minStock > 0 ? (
-                         <span className="text-warning font-bold">{product.minStock} {product.unit}</span>
-                       ) : (
-                         <span className="text-muted italic">Tidak dibatasi</span>
-                       )}
-                    </td>
-                    <td style={{ textAlign: 'right', paddingRight: 24 }}>
-                       <div className="flex" style={{ gap: 8, justifyContent: 'flex-end' }}>
-                          <QRButton type="product" id={product.id} name={product.sku} />
-                          <button className="btn btn-ghost btn-icon btn-sm" onClick={() => setModalProduct(product)} title="Edit Master"><Edit2 size={16} /></button>
-                          {isAdmin && (
-                            <button className="btn btn-ghost btn-icon btn-sm text-danger" onClick={() => handleDeleteProduct(product)} title="Hapus Master"><Trash2 size={16} /></button>
-                          )}
-                       </div>
-                    </td>
-                 </tr>
-               ))}
-             </tbody>
-           </table>
+                </tr>
+              ) : products.map(p => (
+                <tr key={p.id}>
+                  <td style={{ padding: '16px 24px' }}>
+                    <div style={{ fontWeight: 700, fontSize: 15, color: 'var(--text-white)' }}>{p.name}</div>
+                    <div style={{ fontSize: 12, color: 'var(--primary)', fontFamily: 'monospace' }}>{p.sku}</div>
+                  </td>
+                  <td>
+                    <span className="badge badge-gray">{p.category?.name || 'Umum'}</span>
+                  </td>
+                  <td>{p.unit}</td>
+                  <td style={{ textAlign: 'center' }}>{p.minStock}</td>
+                  <td style={{ textAlign: 'right', paddingRight: 24 }}>
+                    <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                      <QRButton type="item" id={p.id} name={p.name} />
+                      <button className="btn btn-ghost btn-icon btn-sm" onClick={() => setModal({ show: true, product: p })}>
+                        <Edit2 size={16} />
+                      </button>
+                      {isAdmin && (
+                        <button className="btn btn-ghost btn-icon btn-sm text-danger" onClick={() => handleDelete(p.id)}>
+                          <Trash2 size={16} />
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Pagination Footer */}
+        <div style={{ 
+          padding: '16px 24px', 
+          background: 'rgba(0,0,0,0.1)', 
+          borderTop: '1px solid var(--border)',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center'
+        }}>
+           <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+              Menampilkan {products.length} dari <span style={{ color: 'var(--text-white)', fontWeight: 600 }}>{totalCount}</span> produk
+           </div>
+           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button 
+                className="btn btn-ghost btn-sm" 
+                disabled={page <= 1 || loading}
+                onClick={() => setPage(page - 1)}
+              >
+                Previous
+              </button>
+              <span style={{ fontSize: 13, color: 'var(--text-muted)', margin: '0 8px' }}>
+                Halaman <span style={{ color: 'var(--primary)', fontWeight: 700 }}>{page}</span> / {totalPages}
+              </span>
+              <button 
+                className="btn btn-ghost btn-sm" 
+                disabled={page >= totalPages || loading}
+                onClick={() => setPage(page + 1)}
+              >
+                Next
+              </button>
+           </div>
         </div>
       </div>
 
-      {modalProduct && <ProductModal product={modalProduct.id ? modalProduct : null} onClose={() => setModalProduct(null)} onSaved={loadProducts} />}
-      
+      {modal.show && (
+        <ProductModal 
+          product={modal.product} 
+          onClose={() => setModal({ show: false, product: null })} 
+          onSaved={fetchData} 
+        />
+      )}
+
       <style>{`
-        .hover-row:hover { background: rgba(255,255,255,0.02); }
         .skeleton-line { height: 20px; background: var(--border); border-radius: 4px; animation: pulse 1.5s infinite; }
-        .flex { display: flex; align-items: center; }
+        .text-danger:hover { color: var(--danger) !important; background: var(--danger-bg) !important; }
       `}</style>
     </div>
   );

@@ -52,26 +52,20 @@ export default function SearchPage() {
 
   const handleResultClick = (result) => {
     if (result.type === 'user') {
-      toast(`Staf: ${result.name} (${result.code})`, { icon: '👤' });
+      toast(`Staf: ${result.name}`, { icon: '👤' });
       return;
     }
     
-    if (!result.location) return toast.error("Lokasi tidak ditemukan");
+    if (!result.coords) return toast.error("Kordinat lokasi tidak ditemukan");
 
-    const floorId = result.location.section.rack.floorId;
     const params = new URLSearchParams();
-    params.set("rackId", result.location.section.rack.id);
-    params.set("sectionId", result.location.section.id);
-    params.set("levelId", result.location.id);
+    if (result.coords.rackId) params.set("rackId", result.coords.rackId);
+    if (result.coords.sectionId) params.set("sectionId", result.coords.sectionId);
+    if (result.coords.levelId) params.set("levelId", result.coords.levelId);
+    if (result.coords.palletId) params.set("palletId", result.coords.palletId);
+    if (result.coords.boxId) params.set("boxId", result.coords.boxId);
     
-    if (result.type === 'pallet') {
-      params.set("palletId", result.id.replace('pallet-', ''));
-    } else if (result.type === 'box') {
-      if (result.palletId) params.set("palletId", result.palletId);
-      params.set("boxId", result.id.replace('box-', ''));
-    }
-    
-    navigate(`/locations/${floorId}?${params.toString()}`);
+    navigate(`/locations/${result.floorId}?${params.toString()}`);
   };
 
   // Grouping results
@@ -83,7 +77,7 @@ export default function SearchPage() {
   }, {});
 
   const typeLabels = {
-    product: "Produk",
+    product: "Produk / Item",
     box: "Box / Aset",
     pallet: "Pallet",
     user: "Personel (Staf)"
@@ -98,72 +92,101 @@ export default function SearchPage() {
 
   return (
     <div className="page-container animate-fade">
-      <div className="page-header" style={{ marginBottom: 40 }}>
+      <div className="page-header" style={{ marginBottom: 40, borderBottom: '1px solid var(--border)', paddingBottom: 24 }}>
         <div>
-          <h1>Cari Produk & Lokasi</h1>
-          <p>Temukan lokasi box atau produk dengan mengetik kode part atau nama</p>
+          <h1 style={{ fontSize: 32, fontWeight: 800, letterSpacing: '-0.5px' }}>Deep Search</h1>
+          <p style={{ fontSize: 16 }}>Pencarian mendalam untuk melacak kordinat produk, pallet, dan box secara presisi.</p>
         </div>
       </div>
 
-      <div className="search-box" style={{ 
-        maxWidth: 700, margin: '0 auto 40px', padding: '12px 24px', 
-        height: 64, borderRadius: 20, background: 'var(--bg-surface)', 
-        boxShadow: '0 12px 48px rgba(0,0,0,0.2)', border: '1px solid var(--border)' 
-      }}>
-        <Search size={28} color="var(--primary)" />
-        <input
-          type="text"
-          className="form-control"
-          placeholder="Ketik kode part, nama produk, nomor pallet, atau kode box..."
-          style={{ fontSize: 20, color: 'var(--text-white)' }}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          autoFocus
-        />
-        {loading && <div className="spinner dark" />}
+      <div className="search-box-wrapper" style={{ maxWidth: 800, margin: '0 auto 60px' }}>
+        <div style={{ 
+          display: 'flex', alignItems: 'center', gap: 16, padding: '0 24px', 
+          height: 72, borderRadius: 24, background: 'var(--bg-card)', 
+          boxShadow: '0 20px 60px rgba(0,0,0,0.3)', border: '1px solid var(--border-light)' 
+        }}>
+          <Search size={32} color="var(--primary)" />
+          <input
+            type="text"
+            className="form-control"
+            placeholder="Cari SKU, Nama Produk, Nomor Lot, atau Kode Pallet..."
+            style={{ fontSize: 22, height: '100%', background: 'none', border: 'none', boxShadow: 'none', color: 'var(--text-white)' }}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            autoFocus
+          />
+          {loading && <div className="spinner dark" />}
+        </div>
       </div>
 
-      <div style={{ maxWidth: 800, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ maxWidth: 900, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 24 }}>
         {results.length === 0 && query && !loading && (
-          <div style={{ textAlign: 'center', padding: 100, opacity: 0.5 }}>
-             <Package size={48} style={{ margin: '0 auto 16px' }} />
-             <p>Tidak ada hasil untuk "{query}"</p>
+          <div style={{ textAlign: 'center', padding: 80, opacity: 0.5 }}>
+             <Package size={64} style={{ margin: '0 auto 20px' }} />
+             <p style={{ fontSize: 18 }}>Hasil pencarian untuk "{query}" tidak ditemukan di gudang ini.</p>
           </div>
         )}
 
         {Object.entries(grouped).map(([type, items]) => (
-          <div key={type} className="animate-up" style={{ marginBottom: 32 }}>
-             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, color: 'var(--primary)', fontWeight: 700, fontSize: 13, textTransform: 'uppercase', letterSpacing: 1 }}>
-                {typeIcons[type]}
+          <div key={type} className="animate-up" style={{ marginBottom: 40 }}>
+             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20, color: 'var(--text-secondary)', fontWeight: 800, fontSize: 13, textTransform: 'uppercase', letterSpacing: 1.5 }}>
+                <div style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--primary)' }}></div>
                 {typeLabels[type]} ({items.length})
              </div>
-             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+             
+             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(400px, 1fr))', gap: 16 }}>
                 {items.map((res) => (
                   <div 
                     key={res.id} 
-                    className="card hover-card" 
+                    className="card hover-card animate-fade-in" 
                     style={{ 
-                      cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 20, padding: 16, 
+                      cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 12, padding: 24, 
                       background: 'var(--bg-card)', border: '1px solid var(--border)',
-                      borderLeft: `4px solid ${res.type === 'product' ? 'var(--primary)' : res.type === 'box' ? 'var(--info)' : res.type === 'pallet' ? 'var(--warning)' : 'var(--success)'}`
+                      borderRadius: 20,
+                      position: 'relative',
+                      overflow: 'hidden'
                     }}
                     onClick={() => handleResultClick(res)}
                   >
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                        <span style={{ fontWeight: 700, fontSize: 16, color: 'var(--text-white)' }}>{res.name}</span>
-                        {res.type === 'user' && <span className="badge badge-success" style={{ fontSize: 10 }}>ONLINE</span>}
+                    {/* Hover Glow */}
+                    <div style={{ position: 'absolute', top: 0, left: 0, width: 4, height: '100%', background: res.type === 'product' ? 'var(--success)' : res.type === 'box' ? '#3b82f6' : 'var(--warning)' }}></div>
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 800, fontSize: 18, color: 'var(--text-white)', marginBottom: 4 }}>{res.name}</div>
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                           <span className="badge badge-gray" style={{ fontSize: 10, fontFamily: 'var(--font-mono)' }}>{res.code}</span>
+                           {res.lot && <span className="badge badge-warning" style={{ fontSize: 10 }}>LOT: {res.lot}</span>}
+                           {res.category && <span className="badge badge-primary" style={{ fontSize: 10 }}>{res.category}</span>}
+                        </div>
                       </div>
-                      <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 6 }}>ID/SKU: <span className="font-mono">{res.code}</span></div>
-                      
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: res.type === 'user' ? 'var(--text-muted)' : 'var(--success)', fontWeight: 600, fontSize: 12 }}>
-                        {res.type === 'user' ? <Users size={12} /> : <MapPin size={12} />}
-                        {res.path}
+                      <div className="btn-icon" style={{ background: 'var(--primary-glow)', border: 'none' }}>
+                        <MapPin size={18} color="var(--primary)" />
                       </div>
                     </div>
 
-                    <div style={{ padding: '0 10px', color: 'var(--text-muted)' }}>
-                      <ArrowRight size={18} />
+                    <div style={{ 
+                      marginTop: 8, padding: '12px 16px', background: 'rgba(255,255,255,0.03)', 
+                      borderRadius: 12, border: '1px dashed var(--border)',
+                      display: 'flex', alignItems: 'center', gap: 10 
+                    }}>
+                      <Layers size={14} color="var(--text-muted)" />
+                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+                        {res.path || "Lokasi Belum Terdaftar"}
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', gap: 12, marginTop: 4 }}>
+                      {res.boxCode && (
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                          📦 Box: <span className="font-mono" style={{ color: 'var(--text-secondary)' }}>{res.boxCode}</span>
+                        </div>
+                      )}
+                      {res.palletCode && (
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                          🏗️ Pallet: <span className="font-mono" style={{ color: 'var(--text-secondary)' }}>{res.palletCode}</span>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}

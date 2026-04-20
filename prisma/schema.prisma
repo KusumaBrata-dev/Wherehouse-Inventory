@@ -49,6 +49,8 @@ model Product {
   stock         Stock?
   transactions  Transaction[]
 
+  @@index([name])
+  @@index([sku])
   @@map("products")
 }
 
@@ -56,7 +58,6 @@ model Stock {
   id               Int      @id @default(autoincrement())
   quantity         Int      @default(0)
   lastUpdated      DateTime @default(now()) @updatedAt @map("last_updated")
-  reservedQuantity Int      @default(0) @map("reserved_quantity")
   productId        Int      @unique @map("product_id")
   product          Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
 
@@ -73,6 +74,7 @@ model RackLocation {
   productId Int      @map("product_id")
   product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
 
+  @@index([productId])
   @@map("rack_locations")
 }
 
@@ -100,6 +102,7 @@ model Rack {
 model Section {
   id        Int         @id @default(autoincrement())
   number    Int
+  code      String?     @unique @map("code")
   rackId    Int         @map("rack_id")
   createdAt DateTime    @default(now())
   levels    RackLevel[]
@@ -110,14 +113,18 @@ model Section {
 }
 
 model RackLevel {
-  id        Int      @id @default(autoincrement())
-  number    Int
-  sectionId Int      @map("section_id")
-  createdAt DateTime @default(now())
+  id         Int      @id @default(autoincrement())
+  number     Int
+  sectionId  Int      @map("section_id")
+  code       String?  @unique @map("code")
+  maxPallets Int      @default(20) @map("max_pallets")
+  createdAt  DateTime @default(now())
   pallets   Pallet[]
   section   Section  @relation(fields: [sectionId], references: [id], onDelete: Cascade)
 
   @@unique([sectionId, number])
+  @@index([sectionId])
+  @@index([code])
   @@map("rack_levels")
 }
 
@@ -126,26 +133,31 @@ model Pallet {
   code        String    @unique
   name        String?
   rackLevelId Int       @map("rack_level_id")
+  maxBoxes    Int       @default(80) @map("max_boxes")
   createdAt   DateTime  @default(now())
   boxes       Box[]
   rackLevel   RackLevel @relation(fields: [rackLevelId], references: [id], onDelete: Cascade)
 
+  @@index([rackLevelId])
   @@map("pallets")
 }
 
 model Box {
-  id           Int           @id @default(autoincrement())
-  code         String        @unique
+  id           Int             @id @default(autoincrement())
+  code         String          @unique
   name         String?
-  palletId     Int?          @map("pallet_id")
-  createdAt    DateTime      @default(now())
-  holderId     Int?          @map("holder_id")
-  isPersonal   Boolean       @default(false) @map("is_personal")
+  palletId     Int?            @map("pallet_id")
+  createdAt    DateTime        @default(now())
+  holderId     Int?            @map("holder_id")
+  isPersonal   Boolean         @default(false) @map("is_personal")
+  status       InventoryStatus @default(RECEIVED) @map("status")
   boxProducts  BoxProduct[]
-  holder       User?         @relation(fields: [holderId], references: [id])
-  pallet       Pallet?       @relation(fields: [palletId], references: [id], onDelete: Cascade)
+  holder       User?           @relation(fields: [holderId], references: [id])
+  pallet       Pallet?         @relation(fields: [palletId], references: [id], onDelete: Cascade)
   transactions Transaction[]
 
+  @@index([palletId])
+  @@index([status])
   @@map("boxes")
 }
 
@@ -153,14 +165,15 @@ model BoxProduct {
   id               Int      @id @default(autoincrement())
   boxId            Int      @map("box_id")
   productId        Int      @map("product_id")
-  lotNumber        String?  @map("lot_number")
+  lotNumber        String   @default("") @map("lot_number")
   quantity         Int      @default(0)
-  reservedQuantity Int      @default(0) @map("reserved_quantity")
   updatedAt        DateTime @updatedAt @map("updated_at")
   box              Box      @relation(fields: [boxId], references: [id], onDelete: Cascade)
   product          Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@unique([boxId, productId, lotNumber])
+  @@index([productId])
+  @@index([lotNumber])
   @@map("box_products")
 }
 
@@ -207,23 +220,34 @@ model PurchaseOrderItem {
 }
 
 model Transaction {
-  id              Int             @id @default(autoincrement())
-  type            TransactionType
-  quantity        Int
-  referenceNo     String?         @map("reference_no")
-  userId          Int             @map("user_id")
-  note            String?
-  date            DateTime        @default(now())
-  createdAt       DateTime        @default(now()) @map("created_at")
-  boxId           Int?            @map("box_id")
-  purchaseOrderId Int?            @map("purchase_order_id")
-  productId       Int             @map("product_id")
-  box             Box?            @relation(fields: [boxId], references: [id], onDelete: Cascade)
-  product         Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
-  purchaseOrder   PurchaseOrder?  @relation(fields: [purchaseOrderId], references: [id])
-  user            User            @relation(fields: [userId], references: [id])
+  id               Int             @id @default(autoincrement())
+  type             TransactionType
+  quantity         Int
+  referenceNo      String?         @map("reference_no")
+  userId           Int             @map("user_id")
+  note             String?
+  date             DateTime        @default(now())
+  createdAt        DateTime        @default(now()) @map("created_at")
+  boxId            Int?            @map("box_id")
+  purchaseOrderId  Int?            @map("purchase_order_id")
+  productId        Int             @map("product_id")
+  fromLocationCode String?         @map("from_location_code")
+  toLocationCode   String?         @map("to_location_code")
+  box              Box?            @relation(fields: [boxId], references: [id], onDelete: Cascade)
+  product          Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  purchaseOrder    PurchaseOrder?  @relation(fields: [purchaseOrderId], references: [id])
+  user             User            @relation(fields: [userId], references: [id])
 
+  @@index([productId])
+  @@index([userId])
+  @@index([type])
+  @@index([date])
   @@map("transactions")
+}
+
+enum InventoryStatus {
+  RECEIVED
+  STORED
 }
 
 enum Role {

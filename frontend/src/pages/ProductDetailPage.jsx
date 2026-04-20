@@ -1,9 +1,9 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { getProduct, getProductQR, getProductBarcode, createTransaction } from '../services/api';
+import { getProduct, getProductQR, getProductBarcode, createTransaction, getTransactions } from '../services/api';
 import api from '../services/api';
 import toast from 'react-hot-toast';
-import { ArrowLeft, Plus, Minus, Trash2, Map, ArrowLeftRight, X, ChevronRight, Box as BoxIcon, Layers, Move, Edit2, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Plus, Minus, Trash2, Map, ArrowLeftRight, X, ChevronRight, Box as BoxIcon, Layers, Move, Edit2, RefreshCw, History, ArrowUp, ArrowDown } from 'lucide-react';
 
 // ─── Modal: Edit Box ──────────────────────────────────────────────────────
 function EditBoxModal({ box, onClose, onUpdated }) {
@@ -361,6 +361,16 @@ function AssignLocationModal({ product, sourceBox = null, onClose, onDone }) {
 
   const [childModal, setChildModal] = useState(null);
   const [editBox, setEditBox] = useState(null);
+  const [suggestions, setSuggestions] = useState([]);
+
+  const fetchSuggestions = async () => {
+    try {
+      const res = await api.get('/locations/suggestions/empty');
+      setSuggestions(res.data);
+    } catch (err) {
+      console.error("Failed to fetch suggestions", err);
+    }
+  };
 
   const fetchFloors = useCallback(async () => {
     const res = await api.get('/locations/floors');
@@ -381,7 +391,31 @@ function AssignLocationModal({ product, sourceBox = null, onClose, onDone }) {
     }
   }, [selRack, selSection]);
 
-  useEffect(() => { fetchFloors(); }, [fetchFloors]);
+  useEffect(() => { 
+    fetchFloors(); 
+    fetchSuggestions();
+  }, [fetchFloors]);
+
+  const useSuggestion = async (sug) => {
+    setLoading(true);
+    try {
+      const res = await api.get(`/locations?floorId=${sug.floorId}`);
+      const data = res.data[0];
+      setSelFloor(data);
+      
+      const rack = data.racks.find(r => r.id === sug.rackId);
+      setSelRack(rack);
+      
+      const sec = rack?.sections.find(s => s.id === sug.sectionId);
+      setSelSection(sec);
+      
+      setSelBox(null);
+    } catch (err) {
+      toast.error("Gagal memuat detail lokasi saran");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleAction = async () => {
     if (!selBox) return toast.error('Pilih Box tujuan');
@@ -431,6 +465,27 @@ function AssignLocationModal({ product, sourceBox = null, onClose, onDone }) {
           </div>
         )}
         
+        {suggestions.length > 0 && !selFloor && (
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--primary)', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Zap size={14} /> REKOMENDASI LOKASI KOSONG
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {suggestions.map(s => (
+                <button 
+                  key={s.id} 
+                  className="card hover-card" 
+                  onClick={() => useSuggestion(s)}
+                  style={{ padding: '10px 14px', textAlign: 'left', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'var(--primary-glow)', border: '1px solid var(--primary)' }}
+                >
+                  <div style={{ fontSize: 12, fontWeight: 600 }}>{s.path}</div>
+                  <ChevronRight size={14} color="var(--primary)" />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div style={{ padding: '8px 0' }}>
           {!selFloor ? (
              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
@@ -445,8 +500,8 @@ function AssignLocationModal({ product, sourceBox = null, onClose, onDone }) {
             <div>
                <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--text-muted)' }}>
                   <span style={{ cursor: 'pointer' }} onClick={() => setSelFloor(null)}>{selFloor.name}</span>
-                  {selRack && <><ChevronRight size={12} /> <span style={{ cursor: 'pointer' }} onClick={() => {setSelSection(null); setSelBox(null); setSelRack(null)}}>{selRack.letter}</span></>}
-                  {selSection && <><ChevronRight size={12} /> <span style={{ cursor: 'pointer' }} onClick={() => {setSelBox(null); setSelSection(null)}}>{selSection.number}</span></>}
+                  {selRack && <><ChevronRight size={12} /> <span style={{ cursor: 'pointer' }} onClick={() => {setSelSection(null); setSelBox(null); setSelRack(null)}}>Rak {selRack.letter}</span></>}
+                  {selSection && <><ChevronRight size={12} /> <span style={{ cursor: 'pointer' }} onClick={() => {setSelBox(null); setSelSection(null)}}>Baris {selRack.letter}{selSection.number}</span></>}
                </div>
 
                {!selRack && (
@@ -541,19 +596,47 @@ export default function ProductDetailPage() {
   const [loading, setLoading] = useState(true);
   const [txModal, setTxModal] = useState(false);
   const [assignModal, setAssignModal] = useState(false);
-  const [sourceBox, setSourceBox] = useState(null); // For relocation
+  const [sourceBox, setSourceBox] = useState(null); 
   const [syncing, setSyncing] = useState(false);
+  const [transactions, setTransactions] = useState([]);
+  const [activeTab, setActiveTab] = useState('locations'); // 'locations' | 'history'
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [hasMoreHistory, setHasMoreHistory] = useState(true);
 
   const load = async () => {
     setLoading(true);
     try {
       const data = await getProduct(id);
       setProduct(data);
+      // Also load initial history
+      loadHistory(true);
     } catch {
       toast.error('Produk tidak ditemukan');
       navigate('/products');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadHistory = async (reset = false) => {
+    if (loadingHistory) return;
+    const pageToLoad = reset ? 1 : historyPage;
+    setLoadingHistory(true);
+    try {
+      const res = await getTransactions({ productId: id, page: pageToLoad, limit: 15 });
+      if (reset) {
+        setTransactions(res.transactions);
+        setHistoryPage(2);
+      } else {
+        setTransactions(prev => [...prev, ...res.transactions]);
+        setHistoryPage(prev => prev + 1);
+      }
+      setHasMoreHistory(res.transactions.length === 15);
+    } catch (err) {
+      console.error("Failed to load history", err);
+    } finally {
+      setLoadingHistory(false);
     }
   };
 
@@ -621,34 +704,132 @@ export default function ProductDetailPage() {
         </div>
       </div>
 
-      <div className="card" style={{ marginTop: 20 }}>
-        <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span className="card-title"><Map size={18} /> Penempatan Warehouse (Hierarki)</span>
-          <button className="btn btn-primary btn-sm" onClick={() => { setSourceBox(null); setAssignModal(true); }}><Plus size={14} /> Taruh di Pallet / Box</button>
-        </div>
-        <div style={{ padding: '12px 0' }}>
-           {(!product.boxProducts || product.boxProducts.length === 0) ? (
-             <div style={{ textAlign: 'center', padding: 40, opacity: 0.5 }}>Produk ini belum didata posisinya di map gudang.</div>
-           ) : (
-             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 16 }}>
-               {product.boxProducts.map(bp => (
-                  <div key={bp.boxId} className="card glass hover-card" style={{ borderLeft: '4px solid var(--primary)', padding: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div>
-                      <div style={{ fontWeight: 700, fontSize: 16 }}>{bp.box.name}</div>
-                      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
-                        {bp.box.pallet?.rackLevel.section.rack.floor.name} &gt; Rak {bp.box.pallet?.rackLevel.section.rack.letter} &gt; Level {bp.box.pallet?.rackLevel.number} &gt; <strong>{bp.box.pallet?.name}</strong>
-                      </div>
-                      <div style={{ fontSize: 20, fontWeight: 800 }}>{bp.quantity} <span style={{ fontSize: 11, fontWeight: 400 }}>{product.unit}</span></div>
-                    </div>
-                    <button className="btn btn-ghost btn-sm" onClick={() => { setSourceBox(bp); setAssignModal(true); }}>
-                       <Move size={14} /> Pindahkan
-                    </button>
-                  </div>
-               ))}
-             </div>
-           )}
-        </div>
+      {/* ── Tabs Navigation ── */}
+      <div style={{ display: 'flex', gap: 24, borderBottom: '1px solid var(--border)', marginBottom: 24, marginTop: 40 }}>
+        <button 
+          className={`tab-btn ${activeTab === 'locations' ? 'active' : ''}`}
+          onClick={() => setActiveTab('locations')}
+          style={{ padding: '12px 16px', fontSize: 14, fontWeight: 700, color: activeTab === 'locations' ? 'var(--primary)' : 'var(--text-muted)', borderBottom: activeTab === 'locations' ? '2px solid var(--primary)' : 'none', background: 'none', borderTop: 'none', borderLeft: 'none', borderRight: 'none', cursor: 'pointer' }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Map size={18} /> Penempatan Warehouse
+          </div>
+        </button>
+        <button 
+          className={`tab-btn ${activeTab === 'history' ? 'active' : ''}`}
+          onClick={() => setActiveTab('history')}
+          style={{ padding: '12px 16px', fontSize: 14, fontWeight: 700, color: activeTab === 'history' ? 'var(--primary)' : 'var(--text-muted)', borderBottom: activeTab === 'history' ? '2px solid var(--primary)' : 'none', background: 'none', borderTop: 'none', borderLeft: 'none', borderRight: 'none', cursor: 'pointer' }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <History size={18} /> Riwayat Mutasi Produk
+          </div>
+        </button>
       </div>
+
+      {activeTab === 'locations' ? (
+        <div className="card animate-fade-in" style={{ border: 'none', padding: 0 }}>
+          <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+            <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-secondary)' }}>MAPPING POSISI SAAT INI</span>
+            <button className="btn btn-primary btn-sm" onClick={() => { setSourceBox(null); setAssignModal(true); }}><Plus size={14} /> Taruh di Pallet / Box baru</button>
+          </div>
+          
+          <div style={{ padding: '12px 0' }}>
+            {(!product.boxProducts || product.boxProducts.length === 0) ? (
+              <div style={{ textAlign: 'center', padding: 60, opacity: 0.5, background: 'var(--bg-surface)', borderRadius: 20 }}>
+                <Map size={48} style={{ marginBottom: 16 }} />
+                <p>Produk ini belum didata posisinya di map gudang.</p>
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: 16 }}>
+                {product.boxProducts.map(bp => (
+                    <div key={bp.boxId} className="card glass hover-card animate-up" style={{ padding: 0, overflow: 'hidden', border: '1px solid var(--border)' }}>
+                      <div style={{ background: 'var(--primary-glow)', padding: '12px 16px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <BoxIcon size={16} color="var(--primary)" />
+                            <span style={{ fontWeight: 800, fontSize: 14 }}>{bp.box.name}</span>
+                         </div>
+                         <button className="btn btn-ghost btn-sm" style={{ padding: '4px 8px' }} onClick={() => { setSourceBox(bp); setAssignModal(true); }}>
+                            <ArrowLeftRight size={14} /> Pindahkan
+                         </button>
+                      </div>
+                      <div style={{ padding: 16 }}>
+                        <div style={{ fontSize: 40, fontWeight: 900, marginBottom: 4, letterSpacing: -1 }}>
+                          {bp.quantity} <span style={{ fontSize: 12, fontWeight: 400, color: 'var(--text-muted)' }}>{product.unit}</span>
+                        </div>
+                        {bp.lotNumber && <div style={{ marginBottom: 12 }}><span className="badge badge-warning" style={{ fontSize: 10 }}>LOT: {bp.lotNumber}</span></div>}
+                        
+                        <div style={{ padding: '10px 12px', background: 'rgba(255,255,255,0.02)', borderRadius: 10, border: '1px dashed var(--border)' }}>
+                           <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: 1 }}>Full Coordinate Path</div>
+                           <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                             <Map size={12} /> {bp.box.pallet?.rackLevel?.section?.rack?.floor?.name} &gt; Rak {bp.box.pallet?.rackLevel?.section?.rack?.letter} &gt; Row {bp.box.pallet?.rackLevel?.section?.number} &gt; Lvl {bp.box.pallet?.rackLevel?.number}
+                           </div>
+                        </div>
+                        <div style={{ marginTop: 12, fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                           <Layers size={12} /> Unit Pallet: <span style={{ color: 'var(--primary)', fontWeight: 700 }}>{bp.box.pallet?.name}</span>
+                        </div>
+                      </div>
+                    </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="card animate-fade-in" style={{ border: 'none', padding: 0 }}>
+           <div className="card-header" style={{ marginBottom: 20 }}>
+             <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-secondary)' }}>MUTASI TERAKHIR ({product.name})</span>
+           </div>
+           
+           <div className="table-container" style={{ border: 'none', background: 'var(--bg-card)' }}>
+             <table style={{ borderCollapse: 'separate', borderSpacing: '0 8px', width: '100%' }}>
+               <thead>
+                 <tr>
+                   <th style={{ padding: '12px 20px' }}>Tanggal</th>
+                   <th>Tipe</th>
+                   <th>Jumlah</th>
+                   <th>Operator</th>
+                   <th>Catatan Audit</th>
+                 </tr>
+               </thead>
+               <tbody>
+                 {loadingHistory ? (
+                   <tr><td colSpan={5} style={{ textAlign: 'center', padding: 40 }}><div className="spinner" /></td></tr>
+                 ) : transactions.length === 0 ? (
+                   <tr><td colSpan={5} style={{ textAlign: 'center', padding: 40, opacity: 0.5 }}>Belum ada histori transaksi untuk SKU ini.</td></tr>
+                 ) : transactions.map(tx => (
+                   <tr key={tx.id} style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)' }}>
+                     <td style={{ padding: '16px 20px', borderRadius: '12px 0 0 12px', fontSize: 12, color: 'var(--text-muted)' }}>
+                        {new Date(tx.date).toLocaleDateString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                     </td>
+                     <td>
+                        <span className={`badge ${tx.type === 'IN' ? 'badge-success' : tx.type === 'OUT' ? 'badge-danger' : 'badge-primary'}`}>
+                           {tx.type === 'IN' && <ArrowUp size={10} />}
+                           {tx.type === 'OUT' && <ArrowDown size={10} />}
+                           {tx.type === 'MOVE' && <ArrowLeftRight size={10} />}
+                           {tx.type}
+                        </span>
+                     </td>
+                     <td style={{ fontSize: 18, fontWeight: 800 }}>
+                        {tx.type === 'OUT' ? '-' : tx.type === 'IN' ? '+' : ''}{tx.quantity}
+                     </td>
+                     <td style={{ fontSize: 13 }}>{tx.user?.name}</td>
+                     <td style={{ padding: '16px 20px', borderRadius: '0 12px 12px 0', fontSize: 13 }}>
+                        {tx.type === 'MOVE' ? (
+                          <div style={{ background: 'rgba(255,255,255,0.03)', padding: '6px 12px', borderRadius: 8, border: '1px solid var(--border)' }}>
+                            {tx.note}
+                          </div>
+                        ) : (
+                          <span style={{ color: 'var(--text-muted)' }}>{tx.note || '—'}</span>
+                        )}
+                        {tx.referenceNo && <div style={{ fontSize: 10, color: 'var(--primary)', marginTop: 4, fontFamily: 'monospace' }}>REF: {tx.referenceNo}</div>}
+                     </td>
+                   </tr>
+                 ))}
+               </tbody>
+             </table>
+           </div>
+        </div>
+      )}
 
       {txModal && <TransactionModal product={product} onClose={() => setTxModal(false)} onDone={load} />}
       {assignModal && <AssignLocationModal product={product} sourceBox={sourceBox} onClose={() => setAssignModal(false)} onDone={load} />}

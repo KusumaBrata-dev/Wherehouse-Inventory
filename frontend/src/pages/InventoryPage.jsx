@@ -9,6 +9,10 @@ export default function InventoryPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [filterType, setFilterType] = useState('all'); // 'all', 'low', 'out'
+  const [summary, setSummary] = useState({ total: 0, lowStock: 0, outOfStock: 0, totalQty: 0 });
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -22,27 +26,27 @@ export default function InventoryPage() {
   const fetchStock = useCallback(async () => {
     setLoading(true);
     try {
-      const { data } = await api.get('/stock');
+      // SSP: Pass search and page to backend
+      const { data } = await api.get('/stock', { params: { page, search, filter: filterType } });
       setStocks(data.stocks || []);
+      setSummary(data.summary || { total: 0, lowStock: 0, outOfStock: 0, totalQty: 0 });
+      setTotalPages(data.pagination?.totalPages || 1);
     } catch (err) {
       toast.error('Gagal memuat data inventaris');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [page, search, filterType]);
 
   useEffect(() => {
     fetchStock();
   }, [fetchStock]);
 
-  const filteredStocks = stocks.filter(s => {
-    const matchesSearch = s.product.name.toLowerCase().includes(search.toLowerCase()) || 
-                          s.product.sku.toLowerCase().includes(search.toLowerCase());
-    
-    if (filterType === 'low') return matchesSearch && s.quantity <= s.product.minStock && s.quantity > 0;
-    if (filterType === 'out') return matchesSearch && s.quantity === 0;
-    return matchesSearch;
-  });
+  // Handle Search with debounce or simpler: reset to page 1
+  const handleSearchChange = (e) => {
+    setSearch(e.target.value);
+    setPage(1); // Reset to page 1 on new search
+  };
 
   const [showImportModal, setShowImportModal] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -99,7 +103,7 @@ export default function InventoryPage() {
             className="form-control"
             placeholder="Cari nama produk atau SKU..."
             value={search}
-            onChange={e => setSearch(e.target.value)}
+            onChange={handleSearchChange}
           />
         </div>
 
@@ -139,15 +143,15 @@ export default function InventoryPage() {
                 Array(10).fill(0).map((_, i) => (
                   <tr key={i}><td colSpan={6} style={{ padding: 20 }}><div className="skeleton-line" /></td></tr>
                 ))
-              ) : filteredStocks.length === 0 ? (
+              ) : stocks.length === 0 ? (
                 <tr>
                   <td colSpan={6} style={{ padding: 100, textAlign: 'center', opacity: 0.5 }}>
                      <Package size={48} style={{ margin: '0 auto 16px' }} />
                      <p>Tidak ada produk yang ditemukan.</p>
                   </td>
                 </tr>
-              ) : filteredStocks.map(s => {
-                const isLow = s.quantity <= s.product.minStock && s.quantity > 0;
+              ) : stocks.map(s => {
+                const isLow = s.quantity <= (s.product.minStock || 10) && s.quantity > 0;
                 const isOut = s.quantity === 0;
                 
                 return (
@@ -222,6 +226,39 @@ export default function InventoryPage() {
               })}
             </tbody>
           </table>
+        </div>
+        
+        {/* Pagination Footer */}
+        <div style={{ 
+          padding: '16px 24px', 
+          background: 'rgba(0,0,0,0.1)', 
+          borderTop: '1px solid var(--border)',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center'
+        }}>
+           <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+              Menampilkan {stocks.length} dari <span style={{ color: 'var(--text-white)', fontWeight: 600 }}>{summary.total}</span> produk
+           </div>
+           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button 
+                className="btn btn-ghost btn-sm" 
+                disabled={page <= 1 || loading}
+                onClick={() => setPage(page - 1)}
+              >
+                Previous
+              </button>
+              <span style={{ fontSize: 13, color: 'var(--text-muted)', margin: '0 8px' }}>
+                Halaman <span style={{ color: 'var(--primary)', fontWeight: 700 }}>{page}</span> / {totalPages}
+              </span>
+              <button 
+                className="btn btn-ghost btn-sm" 
+                disabled={page >= totalPages || loading}
+                onClick={() => setPage(page + 1)}
+              >
+                Next
+              </button>
+           </div>
         </div>
       </div>
       

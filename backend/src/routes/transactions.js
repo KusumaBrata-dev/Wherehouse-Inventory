@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import prisma from '../lib/prisma.js';
 import { authenticate } from '../middleware/auth.js';
+import { validate, transactionSchema } from '../validations/wms.js';
 
 export const transactionsRouter = Router();
 transactionsRouter.use(authenticate);
@@ -40,24 +41,12 @@ transactionsRouter.get('/', async (req, res, next) => {
 });
 
 // POST /api/transactions — Create transaction (IN/OUT/ADJUST)
-transactionsRouter.post('/', async (req, res, next) => {
+transactionsRouter.post('/', validate(transactionSchema), async (req, res, next) => {
   try {
-    const { productId, type, quantity, referenceNo, note, boxId, targetBoxId } = req.body;
-    if (!productId || !type || !quantity) {
-      return res.status(400).json({ error: 'productId, type, and quantity are required' });
-    }
-    if (!['IN', 'OUT', 'ADJUST', 'MOVE'].includes(type)) {
-      return res.status(400).json({ error: 'type must be IN, OUT, ADJUST, or MOVE' });
-    }
-    const qty = parseInt(quantity);
-    if (qty <= 0) return res.status(400).json({ error: 'quantity must be positive' });
-
-    if (type === 'MOVE' && (!boxId || !targetBoxId)) {
-      return res.status(400).json({ error: 'Source box (boxId) and destination box (targetBoxId) are required for MOVE' });
-    }
+    const { productId, type, quantity, referenceNo, note, boxId, targetBoxId, lotNumber } = req.validData;
 
     const result = await prisma.$transaction(async (tx) => {
-      const pid = parseInt(productId);
+      const pid = productId;
       
       const stock = await tx.stock.findUnique({ where: { productId: pid } });
       if (!stock) throw { status: 404, message: 'Product stock record not found' };
@@ -66,69 +55,66 @@ transactionsRouter.post('/', async (req, res, next) => {
 
       // 1. Handle MOVE specially
       if (type === 'MOVE') {
-        const sourceId = parseInt(boxId);
-        const destId = parseInt(targetBoxId);
+        const sourceId = boxId;
+        const destId = targetBoxId;
 
-        // Decrease from source
-        const sourceBi = await tx.boxProduct.findUnique({ where: { boxId_productId_lotNumber: { boxId: sourceId, productId: pid, lotNumber: null } } });
-        if (!sourceBi || sourceBi.quantity < qty) {
-          throw { status: 400, message: `Stok di box asal tidak cukup. Tersedia: ${sourceBi?.quantity || 0}` };
+        // Atomic Decrease from source
+        const sourceBi = await tx.boxProduct.update({
+          where: { boxId_productId_lotNumber: { boxId: sourceId, productId: pid, lotNumber } },
+          data: { quantity: { decrement: quantity } }
+        }).catch(() => { throw { status: 400, message: 'Produk tidak ditemukan di box asal.' }; });
+
+        if (sourceBi.quantity < 0) {
+          throw { status: 400, message: `Stok di box asal tidak cukup. Tersedia: ${sourceBi.quantity + quantity}` };
         }
-        await tx.boxProduct.update({
-          where: { boxId_productId_lotNumber: { boxId: sourceId, productId: pid, lotNumber: null } },
-          data: { quantity: sourceBi.quantity - qty }
+
+        // Atomic Increase in target (Upsert pattern)
+        await tx.boxProduct.upsert({
+          where: { boxId_productId_lotNumber: { boxId: destId, productId: pid, lotNumber } },
+          update: { quantity: { increment: quantity } },
+          create: { boxId: destId, productId: pid, quantity: quantity, lotNumber }
         });
-
-        // Increase in target
-        const destBi = await tx.boxProduct.findUnique({ where: { boxId_productId_lotNumber: { boxId: destId, productId: pid, lotNumber: null } } });
-        if (destBi) {
-          await tx.boxProduct.update({
-            where: { boxId_productId_lotNumber: { boxId: destId, productId: pid, lotNumber: null } },
-            data: { quantity: destBi.quantity + qty }
-          });
-        } else {
-          await tx.boxProduct.create({
-            data: { boxId: destId, productId: pid, quantity: qty }
-          });
-        }
 
         globalDelta = 0; // Global stock doesn't change on MOVE
       } else if (boxId) {
         // 2. Handle Box Level (IN/OUT/ADJUST)
-        const bid = parseInt(boxId);
-        const boxProduct = await tx.boxProduct.findUnique({
-          where: { boxId_productId_lotNumber: { boxId: bid, productId: pid, lotNumber: null } }
-        });
-
-        const oldBoxQty = boxProduct ? boxProduct.quantity : 0;
-        let newBoxQty;
+        const bid = boxId;
 
         if (type === 'IN') {
-          newBoxQty = oldBoxQty + qty;
-          globalDelta = qty;
+          globalDelta = quantity;
+          await tx.boxProduct.upsert({
+            where: { boxId_productId_lotNumber: { boxId: bid, productId: pid, lotNumber } },
+            update: { quantity: { increment: quantity } },
+            create: { boxId: bid, productId: pid, quantity: quantity, lotNumber }
+          });
+
         } else if (type === 'OUT') {
-          if (oldBoxQty < qty) throw { status: 400, message: `Stok di Box tidak cukup. Tersedia: ${oldBoxQty}` };
-          newBoxQty = oldBoxQty - qty;
-          globalDelta = -qty;
+          globalDelta = -quantity;
+          const boxItem = await tx.boxProduct.update({
+            where: { boxId_productId_lotNumber: { boxId: bid, productId: pid, lotNumber } },
+            data: { quantity: { decrement: quantity } }
+          }).catch(() => { throw { status: 400, message: 'Produk tidak ditemukan di cell.' }; });
+
+          if (boxItem.quantity < 0) {
+            throw { status: 400, message: `Stok di cell kurang. Tersedia: ${boxItem.quantity + quantity}` };
+          }
         } else {
           // ADJUST
-          newBoxQty = qty;
-          globalDelta = newBoxQty - oldBoxQty;
-        }
-
-        if (boxProduct) {
-          await tx.boxProduct.update({
-            where: { boxId_productId_lotNumber: { boxId: bid, productId: pid, lotNumber: null } },
-            data: { quantity: newBoxQty }
+          const boxProduct = await tx.boxProduct.findUnique({
+             where: { boxId_productId_lotNumber: { boxId: bid, productId: pid, lotNumber } }
           });
-        } else if (newBoxQty > 0) {
-          await tx.boxProduct.create({
-            data: { boxId: bid, productId: pid, quantity: newBoxQty }
+          const oldBoxQty = boxProduct ? boxProduct.quantity : 0;
+          globalDelta = quantity - oldBoxQty;
+
+          await tx.boxProduct.upsert({
+            where: { boxId_productId_lotNumber: { boxId: bid, productId: pid, lotNumber } },
+            update: { quantity: quantity },
+            create: { boxId: bid, productId: pid, quantity: quantity, lotNumber }
           });
         }
       } else if (type === 'ADJUST') {
         // 3. Special Case: Global-only ADJUST for Syncing
-        globalDelta = qty - stock.quantity;
+        globalDelta = quantity - stock.quantity;
       } else {
         // 4. Reject global-only IN/OUT as per user request
         throw { status: 400, message: 'Transaksi IN/OUT wajib memilik target Box penyimpanan agar data stok sinkron.' };
@@ -137,12 +123,13 @@ transactionsRouter.post('/', async (req, res, next) => {
       // 4. Update Global Stock (only if globalDelta != 0)
       let finalGlobalQty = stock.quantity;
       if (globalDelta !== 0) {
-        finalGlobalQty = stock.quantity + globalDelta;
-        if (finalGlobalQty < 0) throw { status: 400, message: 'Transaksi ini akan mengakibatkan stok negatif.' };
-        await tx.stock.update({
+        const updatedStock = await tx.stock.update({
           where: { productId: pid },
-          data: { quantity: finalGlobalQty }
+          data: { quantity: { increment: globalDelta } }
         });
+        finalGlobalQty = updatedStock.quantity;
+
+        if (finalGlobalQty < 0) throw { status: 400, message: 'Transaksi ini akan mengakibatkan stok negatif di pusat.' };
       }
 
       // 5. Create transaction record
@@ -150,9 +137,9 @@ transactionsRouter.post('/', async (req, res, next) => {
         data: {
           productId: pid,
           type,
-          quantity: qty,
+          quantity: quantity,
           referenceNo,
-          boxId: boxId ? parseInt(boxId) : null,
+          boxId: boxId ? boxId : null,
           note: type === 'MOVE' ? `${note || ''} (Pindah ke Box ID ${targetBoxId})`.trim() : note,
           userId: req.user.id,
         },

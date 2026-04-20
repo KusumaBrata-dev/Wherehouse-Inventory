@@ -104,7 +104,8 @@ export default function Layout() {
         </div>
 
         <nav className="sidebar-nav">
-          <div className="nav-section-title">Menu Utama</div>
+          {/* ── Operasional ── */}
+          <div className="nav-section-title">Operasional</div>
 
           <NavLink
             to="/dashboard"
@@ -114,45 +115,50 @@ export default function Layout() {
             <LayoutDashboard size={18} /> Dashboard
           </NavLink>
 
-          {/* RENAME: Scan -> Cari */}
           <NavLink
-            to="/search"
+            to="/receiving"
+            className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
+            onClick={() => setSidebarOpen(false)}
+            style={{ background: 'rgba(16, 185, 129, 0.08)' }}
+          >
+            <PackagePlus size={18} />
+            <span>Inbound <small style={{ opacity: 0.6, fontSize: 10 }}>INCOMING</small></span>
+          </NavLink>
+
+          <NavLink
+            to="/putaway"
             className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
             onClick={() => setSidebarOpen(false)}
           >
-            <Search size={18} /> Cari Produk
+            <MapPin size={18} /> Putaway
           </NavLink>
-
-          <div className="nav-section-title" style={{ marginTop: 12 }}>
-            Pemetaan Gudang
-          </div>
-          {floors.map((floor) => (
-            <NavLink
-              key={floor.id}
-              to={`/locations/${floor.id}`}
-              className={({ isActive }) =>
-                `nav-item${isActive ? " active" : ""}`
-              }
-              onClick={() => setSidebarOpen(false)}
-            >
-              <MapPin size={18} />
-              {floor.name}
-            </NavLink>
-          ))}
 
           <NavLink
-            to="/locations/personal"
+            to="/move-stock"
             className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
             onClick={() => setSidebarOpen(false)}
-            style={{ marginTop: 4, background: 'rgba(99, 102, 241, 0.05)' }}
           >
-            <Users size={18} />
-            Aset Personel
+            <ArrowLeftRight size={18} /> Pindah Stok
           </NavLink>
 
-          <div className="nav-section-title" style={{ marginTop: 12 }}>
-            Logistik & Inventaris
-          </div>
+          <NavLink
+            to="/scan"
+            className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
+            onClick={() => setSidebarOpen(false)}
+          >
+            <ScanLine size={18} /> Scan Lokasi
+          </NavLink>
+
+          <NavLink
+            to="/stock-opname"
+            className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
+            onClick={() => setSidebarOpen(false)}
+          >
+            <FileText size={18} /> Stock Opname
+          </NavLink>
+
+          {/* ── Inventaris ── */}
+          <div className="nav-section-title" style={{ marginTop: 12 }}>Inventaris</div>
 
           <NavLink
             to="/inventory"
@@ -163,6 +169,14 @@ export default function Layout() {
           </NavLink>
 
           <NavLink
+            to="/search"
+            className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
+            onClick={() => setSidebarOpen(false)}
+          >
+            <Search size={18} /> Cari Produk
+          </NavLink>
+
+          <NavLink
             to="/products"
             className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
             onClick={() => setSidebarOpen(false)}
@@ -170,9 +184,8 @@ export default function Layout() {
             <Package size={18} /> Master Produk
           </NavLink>
 
-          <div className="nav-section-title" style={{ marginTop: 12 }}>
-            Pengadaan (Inbound)
-          </div>
+          {/* ── Pengadaan ── */}
+          <div className="nav-section-title" style={{ marginTop: 12 }}>Pengadaan</div>
 
           <NavLink
             to="/suppliers"
@@ -187,17 +200,26 @@ export default function Layout() {
             className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
             onClick={() => setSidebarOpen(false)}
           >
-            <FileText size={18} /> Purchase Order
+            <Truck size={18} /> Purchase Order
           </NavLink>
 
-          <NavLink
-            to="/receiving"
-            className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
-            onClick={() => setSidebarOpen(false)}
-          >
-            <PackagePlus size={18} /> Terima Produk
-          </NavLink>
+          {/* ── Peta Gudang (semua floor) ── */}
+          <div className="nav-section-title" style={{ marginTop: 12 }}>Peta Gudang</div>
+          {floors.map((floor) => (
+            <NavLink
+              key={floor.id}
+              to={`/locations/${floor.id}`}
+              className={({ isActive }) =>
+                `nav-item${isActive ? " active" : ""}`
+              }
+              onClick={() => setSidebarOpen(false)}
+            >
+              <MapPin size={18} />
+              {floor.name}
+            </NavLink>
+          ))}
 
+          {/* ── Administrasi ── */}
           {isAdmin && (
             <>
               <div className="nav-section-title" style={{ marginTop: 12 }}>
@@ -208,6 +230,7 @@ export default function Layout() {
                 className={({ isActive }) =>
                   `nav-item${isActive ? " active" : ""}`
                 }
+                onClick={() => setSidebarOpen(false)}
               >
                 <Users size={18} /> Manajemen User
               </NavLink>

@@ -1,16 +1,15 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { getStock, getTransactions } from '../services/api';
 import { 
   Package, TrendingDown, AlertTriangle, ArrowLeftRight, ArrowUp, ArrowDown, 
-  ChevronRight, Box, Target, Clock, Activity
+  ChevronRight, Box, Target, Clock, Activity, Layers, Map, PieChart
 } from 'lucide-react';
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend, Cell } from 'recharts';
-
+import { getStock, getTransactions, getFloors, getOccupancyStats } from '../services/api';
 export default function DashboardPage() {
   const [stockData, setStockData] = useState(null);
   const [recentTx, setRecentTx]   = useState([]);
-  const [chartData, setChartData]  = useState([]);
+  const [floors, setFloors]        = useState([]);
+  const [occupancy, setOccupancy]  = useState(null);
   const [loading, setLoading]      = useState(true);
   const navigate = useNavigate();
 
@@ -18,25 +17,13 @@ export default function DashboardPage() {
     Promise.all([
       getStock(),
       getTransactions({ limit: 10 }),
-    ]).then(([stock, tx]) => {
+      getFloors(),
+      getOccupancyStats(),
+    ]).then(([stock, tx, floorData, occ]) => {
       setStockData(stock);
       setRecentTx(tx.transactions);
-
-      // Build chart data
-      const days = [];
-      for (let i = 6; i >= 0; i--) {
-        const d = new Date();
-        d.setDate(d.getDate() - i);
-        const label = d.toLocaleDateString('id-ID', { weekday: 'short' });
-        const dateStr = d.toISOString().split('T')[0];
-        const dayTx = tx.transactions.filter(t => t.date.startsWith(dateStr));
-        days.push({
-          day: label,
-          Masuk: dayTx.filter(t => t.type === 'IN').reduce((s, t) => s + t.quantity, 0),
-          Keluar: dayTx.filter(t => t.type === 'OUT').reduce((s, t) => s + t.quantity, 0),
-        });
-      }
-      setChartData(days);
+      setFloors(floorData);
+      setOccupancy(occ);
     }).finally(() => setLoading(false));
   }, []);
 
@@ -50,7 +37,7 @@ export default function DashboardPage() {
   );
 
   return (
-    <div className="page-container animate-fade" style={{ padding: '40px 20px' }}>
+    <div className="page-container animate-fade" style={{ padding: '24px 20px' }}>
       
       {/* ── BIG HEADER ── */}
       <div className="page-header dashboard-header">
@@ -71,72 +58,55 @@ export default function DashboardPage() {
       {/* ── GIANT KPI CARDS ── */}
       <div className="dashboard-kpi-grid">
         
-        <div className="kpi-card glass primary">
-          <div className="kpi-card-header">
-             <div className="kpi-icon-wrapper"><Package size={32} /></div>
-             <Activity size={20} className="kpi-activity-icon" />
+        <div className="kpi-card glass primary" style={{ padding: '20px 24px' }}>
+          <div className="kpi-card-header" style={{ marginBottom: 16 }}>
+             <div className="kpi-icon-wrapper" style={{ padding: 10 }}><Package size={24} /></div>
+             <Activity size={16} className="kpi-activity-icon" />
           </div>
-          <div className="kpi-value">{summary?.total ?? 0}</div>
+          <div className="kpi-value" style={{ fontSize: 32 }}>{summary?.total ?? 0}</div>
           <div className="kpi-label">Jenis Produk Terdaftar</div>
         </div>
 
-        <div className="kpi-card glass success">
-          <div className="kpi-card-header">
-             <div className="kpi-icon-wrapper"><ArrowLeftRight size={32} /></div>
-             <ArrowUp size={20} className="kpi-activity-icon" />
+        <div className="kpi-card glass success" style={{ padding: '20px 24px' }}>
+          <div className="kpi-card-header" style={{ marginBottom: 16 }}>
+             <div className="kpi-icon-wrapper" style={{ padding: 10 }}><ArrowLeftRight size={24} /></div>
+             <ArrowUp size={16} className="kpi-activity-icon" />
           </div>
-          <div className="kpi-value">{summary?.totalQty?.toLocaleString('id-ID') ?? 0}</div>
+          <div className="kpi-value" style={{ fontSize: 32 }}>{summary?.totalQty?.toLocaleString('id-ID') ?? 0}</div>
           <div className="kpi-label">Total Fisik Produk</div>
         </div>
 
-        <div 
-          className="kpi-card glass warning hover-card" 
-          onClick={() => navigate('/inventory', { state: { filter: 'low' } })}
-        >
-          <div className="kpi-card-header">
-             <div className="kpi-icon-wrapper"><AlertTriangle size={32} /></div>
-             <ChevronRight size={20} className="kpi-activity-icon" />
+          <div className="kpi-card glass warning hover-card" style={{ padding: '20px 24px' }} onClick={() => navigate('/inventory', { state: { filter: 'low' } })}>
+          <div className="kpi-card-header" style={{ marginBottom: 16 }}>
+             <div className="kpi-icon-wrapper" style={{ padding: 10 }}><AlertTriangle size={24} /></div>
+             <ChevronRight size={16} className="kpi-activity-icon" />
           </div>
-          <div className="kpi-value">{summary?.lowStock ?? 0}</div>
+          <div className="kpi-value" style={{ fontSize: 32 }}>{summary?.lowStock ?? 0}</div>
           <div className="kpi-label">Stok Hampir Habis</div>
         </div>
 
-        <div className="kpi-card glass danger">
-          <div className="kpi-card-header">
-             <div className="kpi-icon-wrapper"><TrendingDown size={32} /></div>
-             <AlertTriangle size={20} className="kpi-activity-icon" />
+        <div className="kpi-card glass danger" style={{ padding: '20px 24px' }}>
+          <div className="kpi-card-header" style={{ marginBottom: 16 }}>
+             <div className="kpi-icon-wrapper" style={{ padding: 10 }}><TrendingDown size={24} /></div>
+             <AlertTriangle size={16} className="kpi-activity-icon" />
           </div>
-          <div className="kpi-value">{summary?.outOfStock ?? 0}</div>
+          <div className="kpi-value" style={{ fontSize: 32 }}>{summary?.outOfStock ?? 0}</div>
           <div className="kpi-label">Produk Kosong</div>
+        </div>
+
+        <div className="kpi-card glass info" style={{ padding: '20px 24px', borderTop: '4px solid #3b82f6' }}>
+          <div className="kpi-card-header" style={{ marginBottom: 16 }}>
+             <div className="kpi-icon-wrapper" style={{ padding: 10, background: 'rgba(59, 130, 246, 0.1)', color: '#3b82f6' }}><PieChart size={24} /></div>
+             <div style={{ fontSize: 13, fontWeight: 700, color: '#3b82f6' }}>{occupancy?.overallPercent}%</div>
+          </div>
+          <div className="kpi-value" style={{ fontSize: 32 }}>{occupancy?.usedSlots ?? 0} <span style={{ fontSize: 14, opacity: 0.5 }}>/ {occupancy?.totalSlots ?? 0}</span></div>
+          <div className="kpi-label">Okupansi Gudang (Slot Terpakai)</div>
         </div>
 
       </div>
 
-      {/* ── CHARTS & TABLES ── */}
-      <div className="dashboard-main-grid">
-        
-        {/* Main Chart */}
-        <div className="card glass" style={{ padding: 24 }}>
-          <div className="card-header" style={{ marginBottom: 32 }}>
-            <h2 style={{ fontSize: 20, fontWeight: 700 }}>Aktivitas Keluar Masuk Produk</h2>
-            <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Statistik 7 hari terakhir</div>
-          </div>
-          <div style={{ height: 400, width: '100%' }}>
-            <ResponsiveContainer>
-              <BarChart data={chartData} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
-                <XAxis dataKey="day" axisLine={false} tickLine={false} tick={{ fill: 'var(--text-muted)', fontSize: 12 }} />
-                <YAxis axisLine={false} tickLine={false} tick={{ fill: 'var(--text-muted)', fontSize: 12 }} />
-                <Tooltip 
-                  cursor={{ fill: 'rgba(255,255,255,0.05)' }}
-                  contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12, boxShadow: 'var(--shadow-lg)' }}
-                />
-                <Legend iconType="circle" wrapperStyle={{ paddingTop: 20 }} />
-                <Bar dataKey="Masuk" fill="var(--success)" radius={[6, 6, 0, 0]} />
-                <Bar dataKey="Keluar" fill="var(--danger)" radius={[6, 6, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
+      {/* ── ALERTS & TABLES ── */}
+      <div className="dashboard-main-grid" style={{ gridTemplateColumns: '1fr' }}>
 
         {/* Low Stock List (The Drill down point) */}
         <div className="card glass" style={{ padding: 24 }}>
@@ -178,7 +148,7 @@ export default function DashboardPage() {
       </div>
 
       {/* ── RECENT TRANSACTIONS ── */}
-      <div className="card glass" style={{ marginTop: 32, padding: 32 }}>
+      <div className="card glass" style={{ marginTop: 24, padding: 24 }}>
         <div className="card-header" style={{ marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <Clock size={24} color="var(--primary)" />
@@ -201,7 +171,7 @@ export default function DashboardPage() {
               <tbody>
                 {recentTx.map(tx => (
                   <tr key={tx.id} style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)' }}>
-                    <td style={{ padding: '20px', borderRadius: '12px 0 0 12px', color: 'var(--text-muted)', fontSize: 13 }}>
+                    <td style={{ padding: '12px 20px', borderRadius: '12px 0 0 12px', color: 'var(--text-muted)', fontSize: 13 }}>
                       {new Date(tx.date).toLocaleDateString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
                     </td>
                     <td>
@@ -218,7 +188,7 @@ export default function DashboardPage() {
                         {tx.type === 'IN' ? 'MASUK' : 'KELUAR'}
                       </div>
                     </td>
-                    <td style={{ fontSize: 18, fontWeight: 800 }}>
+                    <td style={{ fontSize: 16, fontWeight: 800 }}>
                       {tx.quantity} 
                       <span className="hide-mobile" style={{ fontSize: 11, fontWeight: 400, color: 'var(--text-muted)', marginLeft: 4 }}>{tx.product.unit}</span>
                       <div className="show-mobile" style={{ fontSize: 10, color: tx.type === 'IN' ? 'var(--success)' : 'var(--danger)', fontWeight: 700 }}>

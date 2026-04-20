@@ -1,11 +1,51 @@
 import { Router } from 'express';
 import prisma from '../lib/prisma.js';
-import { authenticate } from '../middleware/auth.js';
+import { authenticate, requireAdmin, requireAdminOrPPIC } from '../middleware/auth.js';
+import { validate, moveBulkSchema } from '../validations/wms.js';
 import QRCode from 'qrcode';
 
 export const locationsRouter = Router();
 
 locationsRouter.use(authenticate);
+
+// GET /api/locations/suggest — Smart auto-slotting for Putaway (INCOMING items only)
+locationsRouter.get('/suggest', async (req, res, next) => {
+  try {
+    // Find levels that are not full AND not in Incoming Area
+    const levels = await prisma.rackLevel.findMany({
+      include: {
+        pallets: true,
+        section: { include: { rack: { include: { floor: true } } } }
+      },
+      where: {
+        section: {
+          rack: {
+            floor: {
+              name: { not: 'Incoming Area' }  // Exclude staging area from suggestions
+            }
+          }
+        }
+      }
+    });
+
+    const suggestions = levels.filter(lvl => lvl.pallets.length < lvl.maxPallets);
+    if (suggestions.length === 0) {
+       return res.json({ available: false, message: 'Seluruh rak penuh' });
+    }
+
+    const firstChoice = suggestions[0];
+    res.json({
+      available: true,
+      levelId: firstChoice.id,
+      code: firstChoice.code,
+      path: formatPath(firstChoice),
+      used: firstChoice.pallets.length,
+      capacity: firstChoice.maxPallets
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // GET /api/locations/floors — List floors for sidebar
 locationsRouter.get('/floors', async (req, res, next) => {
@@ -344,53 +384,10 @@ locationsRouter.put('/boxes/:id', async (req, res, next) => {
   }
 });
 
-// DELETE /api/locations/boxes/:id — Delete a box (only if empty)
-locationsRouter.delete('/boxes/:id', async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const bid = parseInt(id);
-
-    const box = await prisma.box.findUnique({
-      where: { id: bid },
-      include: { boxProducts: true }
-    });
-
-    if (!box) return res.status(404).json({ error: 'Box tidak ditemukan' });
-    if (box.boxProducts.some(bp => bp.quantity > 0)) {
-      return res.status(400).json({ error: 'Box tidak dapat dihapus karena masih berisi produk.' });
-    }
-
-    await prisma.box.delete({ where: { id: bid } });
-    res.json({ message: 'Box berhasil dihapus' });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// PATCH /api/locations/pallets/:id/move — Move a pallet to a new level
-locationsRouter.patch('/pallets/:id/move', async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const { rackLevelId } = req.body;
-    const updatedPallet = await prisma.pallet.update({
-      where: { id: parseInt(id) },
-      data: { rackLevelId: parseInt(rackLevelId) },
-      include: {
-        rackLevel: {
-          include: {
-            section: { include: { rack: { include: { floor: true } } } }
-          }
-        }
-      }
-    });
-    res.json(updatedPallet);
-  } catch (err) {
-    next(err);
-  }
-});
-
+// DELETE /boxes/:id route has been deduplicated here.
+// PATCH routes have been deduplicated.
 // POST /api/locations/cleanup-auto — Delete empty auto-generated boxes
-locationsRouter.post('/cleanup-auto', async (req, res, next) => {
+locationsRouter.post('/cleanup-auto', requireAdmin, async (req, res, next) => {
   try {
     const boxes = await prisma.box.findMany({
       where: { name: { contains: 'Auto-Generated' } },
@@ -398,25 +395,28 @@ locationsRouter.post('/cleanup-auto', async (req, res, next) => {
     });
     
     let deletedCount = 0;
-    for (const box of boxes) {
-      // Check if box is effectively empty (no products or all qty 0)
-      const isEmpty = box.boxProducts.length === 0 || box.boxProducts.every(bp => bp.quantity === 0);
-      
-      if (isEmpty) {
-        // Disconnect transactions from this box so it can be deleted
-        await prisma.transaction.updateMany({
-          where: { boxId: box.id },
-          data: { boxId: null }
-        });
+    
+    await prisma.$transaction(async (tx) => {
+      for (const box of boxes) {
+        // Check if box is effectively empty (no products or all qty 0)
+        const isEmpty = box.boxProducts.length === 0 || box.boxProducts.every(bp => bp.quantity === 0);
         
-        // Clear box items (the items themselves remain in Master Stock)
-        await prisma.boxProduct.deleteMany({ where: { boxId: box.id } });
-        
-        // Finally delete the box
-        await prisma.box.delete({ where: { id: box.id } });
-        deletedCount++;
+        if (isEmpty) {
+          // Disconnect transactions from this box so it can be deleted
+          await tx.transaction.updateMany({
+            where: { boxId: box.id },
+            data: { boxId: null }
+          });
+          
+          // Clear box items (the items themselves remain in Master Stock)
+          await tx.boxProduct.deleteMany({ where: { boxId: box.id } });
+          
+          // Finally delete the box
+          await tx.box.delete({ where: { id: box.id } });
+          deletedCount++;
+        }
       }
-    }
+    });
     
     res.json({ message: `Berhasil menghapus ${deletedCount} box auto-generated yang kosong.` });
   } catch (err) {
@@ -499,24 +499,134 @@ locationsRouter.get('/qr', async (req, res, next) => {
 });
 
 // DELETE /api/locations/boxes/:id
-locationsRouter.delete('/boxes/:id', async (req, res, next) => {
+locationsRouter.delete('/boxes/:id', requireAdmin, async (req, res, next) => {
   try {
     const { id } = req.params;
     const boxId = parseInt(id);
     
-    // Disconnect transactions
-    await prisma.transaction.updateMany({
-      where: { boxId },
-      data: { boxId: null }
+    const box = await prisma.box.findUnique({
+      where: { id: boxId },
+      include: { boxProducts: true }
+    });
+
+    if (!box) return res.status(404).json({ error: 'Box tidak ditemukan' });
+    if (box.boxProducts.some(bp => bp.quantity > 0)) {
+      return res.status(400).json({ error: 'Box tidak dapat dihapus karena masih berisi stok produk.' });
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // Disconnect transactions
+      await tx.transaction.updateMany({
+        where: { boxId },
+        data: { boxId: null }
+      });
+      
+      // Delete BoxProducts
+      await tx.boxProduct.deleteMany({ where: { boxId } });
+      
+      // Delete Box
+      await tx.box.delete({ where: { id: boxId } });
     });
     
-    // Delete BoxProducts
-    await prisma.boxProduct.deleteMany({ where: { boxId } });
-    
-    // Delete Box
-    await prisma.box.delete({ where: { id: boxId } });
-    
     res.json({ message: 'Box berhasil dihapus' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+
+// POST /api/locations/move-bulk — Move a rack/column/level atomically
+locationsRouter.post('/move-bulk', requireAdmin, validate(moveBulkSchema), async (req, res, next) => {
+  try {
+    const { sourceType, sourceCode, targetLevelCode } = req.validData;
+    const userId = req.user?.id;
+
+    if (!sourceCode || !sourceType || !targetLevelCode) {
+      return res.status(400).json({ error: 'sourceCode, sourceType, dan targetLevelCode wajib diisi' });
+    }
+
+    const targetLevel = await prisma.rackLevel.findUnique({
+      where: { code: targetLevelCode },
+      include: { pallets: true }
+    });
+    if (!targetLevel) return res.status(404).json({ error: 'Lokasi tujuan tidak ditemukan' });
+
+    let palletsToMove = [];
+    if (sourceType === 'LEVEL') {
+      const sourceLevel = await prisma.rackLevel.findUnique({ 
+        where: { code: sourceCode }, 
+        include: { pallets: { include: { boxes: { include: { boxProducts: true } }, rackLevel: true } } } 
+      });
+      if (!sourceLevel) return res.status(404).json({ error: 'Lokasi sumber (LEVEL) tidak ditemukan' });
+      palletsToMove = sourceLevel.pallets;
+    } else if (sourceType === 'COLUMN') {
+      const section = await prisma.section.findUnique({ 
+        where: { code: sourceCode }, 
+        include: { levels: { include: { pallets: { include: { boxes: { include: { boxProducts: true } }, rackLevel: true } } } } } 
+      });
+      if (!section) return res.status(404).json({ error: 'Lokasi sumber (COLUMN) tidak ditemukan' });
+      section.levels.forEach(l => palletsToMove.push(...l.pallets));
+    } else if (sourceType === 'RACK') {
+      const section = await prisma.section.findFirst({ 
+        where: { code: { startsWith: sourceCode + '-' } }, 
+        include: { rack: { include: { sections: { include: { levels: { include: { pallets: { include: { boxes: { include: { boxProducts: true } }, rackLevel: true } } } } } } } } } 
+      });
+      if (!section || !section.rack) return res.status(404).json({ error: 'Lokasi sumber (RACK) tidak ditemukan' });
+      section.rack.sections.forEach(s => s.levels.forEach(l => palletsToMove.push(...l.pallets)));
+    } else {
+      return res.status(400).json({ error: 'sourceType invalid (harus LEVEL, COLUMN, atau RACK)' });
+    }
+
+    if (palletsToMove.length === 0) {
+      return res.status(400).json({ error: 'Tidak ada pallet di lokasi sumber untuk dipindah' });
+    }
+
+    if (targetLevel.pallets.length + palletsToMove.length > targetLevel.maxPallets) {
+      return res.status(400).json({ error: `Kapasitas lokasi tujuan tidak cukup (Maksimal ${targetLevel.maxPallets} pallet).` });
+    }
+
+    const targetCode = targetLevel.code;
+
+    const result = await prisma.$transaction(async (tx) => {
+      for (const pallet of palletsToMove) {
+        if (pallet.rackLevelId === targetLevel.id) continue;
+
+        const fromCode = pallet.rackLevel.code;
+        
+        await tx.pallet.update({
+          where: { id: pallet.id },
+          data: { rackLevelId: targetLevel.id }
+        });
+
+        const productMap = {};
+        pallet.boxes.forEach(box => {
+          box.boxProducts.forEach(bp => {
+            if (!productMap[bp.productId]) productMap[bp.productId] = { qty: 0, boxId: box.id };
+            productMap[bp.productId].qty += bp.quantity;
+          });
+        });
+
+        for (const [pid, data] of Object.entries(productMap)) {
+          if (data.qty > 0) {
+            await tx.transaction.create({
+              data: {
+                type: 'MOVE',
+                productId: parseInt(pid),
+                quantity: data.qty,
+                boxId: data.boxId,
+                note: `Bulk Relokasi: Pallet ${pallet.code} | Dari: ${fromCode} | Ke: ${targetCode}`,
+                fromLocationCode: fromCode,
+                toLocationCode: targetCode,
+                userId: userId
+              }
+            });
+          }
+        }
+      }
+      return palletsToMove.length;
+    });
+
+    res.json({ message: `Berhasil memindahkan ${result} pallet ke ${targetCode}`, palletsMoved: result });
   } catch (err) {
     next(err);
   }
@@ -529,26 +639,89 @@ locationsRouter.patch('/pallets/:id/move', requireAdmin, async (req, res, next) 
     const { newLevelId } = req.body;
     if (!newLevelId) return res.status(400).json({ error: 'newLevelId is required' });
 
-    const pallet = await prisma.pallet.update({
+    const oldPallet = await prisma.pallet.findUnique({
       where: { id: parseInt(id) },
-      data: { rackLevelId: parseInt(newLevelId) },
       include: {
-        rackLevel: {
-          include: {
-            section: { include: { rack: { include: { floor: true } } } }
-          }
-        }
+        rackLevel: { include: { section: { include: { rack: { include: { floor: true } } } } } },
+        boxes: { include: { boxProducts: true } }
       }
     });
 
-    res.json({ message: 'Pallet berhasil dipindah', pallet });
+    if (!oldPallet) return res.status(404).json({ error: 'Pallet not found' });
+    const oldPath = formatPath(oldPallet.rackLevel);
+
+    const targetLevel = await prisma.rackLevel.findUnique({
+      where: { id: parseInt(newLevelId) },
+      include: { pallets: true }
+    });
+    if (!targetLevel) return res.status(404).json({ error: 'Target Level not found' });
+    
+    if (targetLevel.pallets.length >= targetLevel.maxPallets) {
+      return res.status(400).json({ error: `Level tujuan penuh. Kapasitas maksimum: ${targetLevel.maxPallets} pallet.` });
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const updatedPallet = await tx.pallet.update({
+        where: { id: parseInt(id) },
+        data: { rackLevelId: parseInt(newLevelId) },
+        include: {
+          rackLevel: {
+            include: { section: { include: { rack: { include: { floor: true } } } } }
+          }
+        }
+      });
+
+      const newPath = formatPath(updatedPallet.rackLevel);
+      const note = `Putaway: ${oldPallet.name} (${oldPallet.code}) | ${oldPath} → ${newPath}`;
+
+      const productMap = {};
+      oldPallet.boxes.forEach(box => {
+        box.boxProducts.forEach(bp => {
+          if (!productMap[bp.productId]) productMap[bp.productId] = { qty: 0, boxId: box.id };
+          productMap[bp.productId].qty += bp.quantity;
+        });
+      });
+
+      const fromCode = oldPallet.rackLevel.code || oldPath;
+      const toCode = updatedPallet.rackLevel.code || newPath;
+
+      for (const [pid, data] of Object.entries(productMap)) {
+        if (data.qty > 0) {
+          await tx.transaction.create({
+            data: {
+              type: 'MOVE',
+              productId: parseInt(pid),
+              quantity: data.qty,
+              boxId: data.boxId,
+              note: note,
+              fromLocationCode: fromCode,
+              toLocationCode: toCode,
+              userId: req.user.id
+            }
+          });
+        }
+      }
+
+      // Mark all boxes on this pallet as STORED (putaway complete)
+      const boxIds = oldPallet.boxes.map(b => b.id);
+      if (boxIds.length > 0) {
+        await tx.box.updateMany({
+          where: { id: { in: boxIds } },
+          data: { status: 'STORED' }
+        });
+      }
+
+      return updatedPallet;
+    });
+
+    res.json({ message: 'Pallet berhasil dipindah dan dicatat di riwayat', pallet: result });
   } catch (err) {
     next(err);
   }
 });
 
 // DELETE /api/locations/pallets/:id
-locationsRouter.delete('/pallets/:id', async (req, res, next) => {
+locationsRouter.delete('/pallets/:id', requireAdmin, async (req, res, next) => {
   try {
     const { id } = req.params;
     const palletId = parseInt(id);
@@ -556,13 +729,15 @@ locationsRouter.delete('/pallets/:id', async (req, res, next) => {
     // Get all boxes in this pallet
     const boxes = await prisma.box.findMany({ where: { palletId } });
     
-    for (const box of boxes) {
-       await prisma.transaction.updateMany({ where: { boxId: box.id }, data: { boxId: null } });
-       await prisma.boxProduct.deleteMany({ where: { boxId: box.id } });
-       await prisma.box.delete({ where: { id: box.id } });
-    }
-    
-    await prisma.pallet.delete({ where: { id: palletId } });
+    await prisma.$transaction(async (tx) => {
+      for (const box of boxes) {
+         await tx.transaction.updateMany({ where: { boxId: box.id }, data: { boxId: null } });
+         await tx.boxProduct.deleteMany({ where: { boxId: box.id } });
+         await tx.box.delete({ where: { id: box.id } });
+      }
+      
+      await tx.pallet.delete({ where: { id: palletId } });
+    });
     
     res.json({ message: 'Pallet dan seluruh isinya berhasil dihapus' });
   } catch (err) {
@@ -595,6 +770,116 @@ locationsRouter.delete('/racks/:id', async (req, res, next) => {
   try {
     await prisma.rack.delete({ where: { id: parseInt(req.params.id) } });
     res.json({ message: 'Rak berhasil dihapus' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+
+// POST /api/locations/inbound — Direct inbound (no PO required)
+// Body: { items: [{ productId, quantity, lotNumber? }], note? }
+// Automatically places items in the INCOMING area, creates a pallet+box if not exists
+locationsRouter.post('/inbound', requireAdminOrPPIC, async (req, res, next) => {
+  try {
+    const { items, note } = req.body;
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'items[] wajib diisi dan tidak boleh kosong.' });
+    }
+
+    // Find INCOMING floor and its first pallet
+    const incomingFloor = await prisma.floor.findFirst({
+      where: { name: 'Incoming Area' },
+      include: {
+        racks: {
+          include: {
+            sections: {
+              include: {
+                levels: { include: { pallets: { include: { boxes: true } } } }
+              }
+            }
+          }
+        }
+      }
+    });
+
+    if (!incomingFloor) {
+      return res.status(500).json({ error: 'Incoming Area tidak ditemukan. Jalankan seed untuk membuatnya.' });
+    }
+
+    // Find or create a pallet in INCOMING
+    const firstLevel = incomingFloor.racks[0]?.sections[0]?.levels[0];
+    if (!firstLevel) {
+      return res.status(500).json({ error: 'Struktur Incoming Area tidak lengkap.' });
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      // Create a new "session" box in INCOMING for this inbound batch
+      const ts = Date.now();
+      const box = await tx.box.create({
+        data: {
+          code: `IN-${ts}`,
+          name: `Inbound ${new Date().toLocaleDateString('id-ID')}`,
+          status: 'RECEIVED',
+          pallet: {
+            create: {
+              code: `PLT-IN-${ts}`,
+              name: `Pallet Inbound ${new Date().toLocaleDateString('id-ID')}`,
+              rackLevelId: firstLevel.id,
+            }
+          }
+        }
+      });
+
+      const createdTrx = [];
+
+      for (const item of items) {
+        const pid = parseInt(item.productId);
+        const qty = parseInt(item.quantity);
+        const lot = item.lotNumber || '';
+
+        if (!pid || !qty || qty <= 0) continue;
+
+        // Upsert BoxProduct
+        await tx.boxProduct.upsert({
+          where: { boxId_productId_lotNumber: { boxId: box.id, productId: pid, lotNumber: lot } },
+          update: { quantity: { increment: qty } },
+          create: { boxId: box.id, productId: pid, quantity: qty, lotNumber: lot },
+        });
+
+        // Update global Stock
+        await tx.stock.upsert({
+          where: { productId: pid },
+          update: { quantity: { increment: qty } },
+          create: { productId: pid, quantity: qty },
+        });
+
+        // Log IN transaction
+        const trx = await tx.transaction.create({
+          data: {
+            type: 'IN',
+            productId: pid,
+            quantity: qty,
+            userId: req.user.id,
+            boxId: box.id,
+            toLocationCode: 'INCOMING',
+            note: note || `Direct Inbound → Incoming Area`,
+          },
+          include: {
+            product: { select: { name: true, sku: true } }
+          }
+        });
+
+        createdTrx.push(trx);
+      }
+
+      return { box, transactions: createdTrx };
+    });
+
+    res.status(201).json({
+      message: `${result.transactions.length} produk berhasil masuk ke Incoming Area`,
+      boxCode: result.box.code,
+      transactions: result.transactions,
+    });
   } catch (err) {
     next(err);
   }

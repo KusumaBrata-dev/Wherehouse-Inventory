@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { getTransactions, exportTransactions } from '../services/api';
 import toast from 'react-hot-toast';
-import { Download, Filter, ArrowUp, ArrowDown } from 'lucide-react';
+import { Download, Filter, ArrowUp, ArrowDown, ArrowRightLeft, RefreshCw } from 'lucide-react';
 
 export default function TransactionsPage() {
   const [data, setData] = useState({ transactions: [], total: 0 });
@@ -55,11 +55,20 @@ export default function TransactionsPage() {
         <input id="filter-start" type="date" className="form-control" style={{ width: 180 }} value={filters.startDate} onChange={e => set('startDate', e.target.value)} />
         <span style={{ color: 'var(--text-muted)' }}>—</span>
         <input id="filter-end" type="date" className="form-control" style={{ width: 180 }} value={filters.endDate} onChange={e => set('endDate', e.target.value)} />
-        {(filters.type || filters.startDate || filters.endDate) && (
-          <button className="btn btn-ghost btn-sm" onClick={() => setFilters({ type: '', startDate: '', endDate: '', page: 1 })}>
-            Reset Filter
+        <div style={{ display: 'flex', gap: 8, marginLeft: 'auto' }}>
+          <button 
+            className={`btn btn-sm ${filters.type === 'MOVE' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => set('type', filters.type === 'MOVE' ? '' : 'MOVE')}
+          >
+            <ArrowRightLeft size={14} /> Riwayat Relokasi
           </button>
-        )}
+          
+          {(filters.type || filters.startDate || filters.endDate) && (
+            <button className="btn btn-ghost btn-sm" onClick={() => setFilters({ type: '', startDate: '', endDate: '', page: 1 })}>
+              <RefreshCw size={14} /> Reset Filter
+            </button>
+          )}
+        </div>
         <span style={{ marginLeft: 'auto', fontSize: 13, color: 'var(--text-muted)' }}>
           Total: <strong style={{ color: 'var(--text-primary)' }}>{data.total}</strong> transaksi
         </span>
@@ -87,8 +96,6 @@ export default function TransactionsPage() {
                   ))}
                 </tr>
               ))
-            ) : data.transactions.length === 0 ? (
-              <tr><td colSpan={7}><div className="empty-state"><p>Tidak ada transaksi ditemukan</p></div></td></tr>
             ) : data.transactions.map(tx => (
               <tr key={tx.id}>
                 <td className="text-sm text-muted" style={{ whiteSpace: 'nowrap' }}>
@@ -96,24 +103,36 @@ export default function TransactionsPage() {
                 </td>
                 <td>
                   <div style={{ fontWeight: 600 }}>{tx.product.name}</div>
-                  <div className="text-xs font-mono" style={{ color: 'var(--primary)' }}>{tx.product.sku}</div>
+                  <div className="text-xs font-mono" style={{ color: 'var(--primary)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {tx.product.sku}
+                    {tx.type === 'MOVE' && <span style={{ color: 'var(--text-muted)', fontSize: 10 }}>| RELOCATED</span>}
+                  </div>
                 </td>
                 <td>
-                  <span className={`badge ${tx.type === 'IN' ? 'badge-success' : tx.type === 'OUT' ? 'badge-danger' : 'badge-warning'}`}>
+                  <span className={`badge ${tx.type === 'IN' ? 'badge-success' : tx.type === 'OUT' ? 'badge-danger' : tx.type === 'MOVE' ? 'badge-primary' : 'badge-warning'}`}>
                     {tx.type === 'IN' && <ArrowUp size={10} />}
                     {tx.type === 'OUT' && <ArrowDown size={10} />}
+                    {tx.type === 'MOVE' && <ArrowRightLeft size={10} />}
                     {tx.type}
                   </span>
                 </td>
                 <td>
-                  <span style={{ fontWeight: 700, color: tx.type === 'IN' ? 'var(--success)' : tx.type === 'OUT' ? 'var(--danger)' : 'var(--warning)' }}>
-                    {tx.type === 'IN' ? '+' : tx.type === 'OUT' ? '-' : '='}{tx.quantity}
+                  <span style={{ fontWeight: 700, color: tx.type === 'IN' ? 'var(--success)' : tx.type === 'OUT' ? 'var(--danger)' : tx.type === 'MOVE' ? 'var(--primary)' : 'var(--warning)' }}>
+                    {tx.type === 'IN' ? '+' : tx.type === 'OUT' ? '-' : tx.type === 'MOVE' ? '⇄' : '='}{tx.quantity}
                   </span>
                   <span className="text-muted text-sm"> {tx.product.unit}</span>
                 </td>
                 <td className="font-mono text-sm">{tx.referenceNo || '—'}</td>
                 <td className="text-sm">{tx.user.name}</td>
-                <td className="text-sm text-muted">{tx.note || '—'}</td>
+                <td className="text-sm" style={{ maxWidth: 300, fontSize: 13 }}>
+                   {tx.type === 'MOVE' ? (
+                     <div style={{ color: 'var(--text-primary)', background: 'var(--bg-surface)', padding: '6px 10px', borderRadius: 8, border: '1px solid var(--border)', lineHeight: 1.4 }}>
+                       {tx.note}
+                     </div>
+                   ) : (
+                     <span className="text-muted">{tx.note || '—'}</span>
+                   )}
+                </td>
               </tr>
             ))}
           </tbody>

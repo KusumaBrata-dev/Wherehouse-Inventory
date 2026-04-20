@@ -19,7 +19,7 @@ boxesRouter.get('/:id/history', async (req, res, next) => {
       prisma.transaction.findMany({
         where: { boxId },
         include: {
-          item: { select: { id: true, name: true, sku: true, unit: true } },
+          product: { select: { id: true, name: true, sku: true, unit: true } },
           user: { select: { id: true, name: true, role: true } },
         },
         orderBy: { date: 'desc' },

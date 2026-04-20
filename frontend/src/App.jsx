@@ -14,6 +14,9 @@ import InventoryPage from './pages/InventoryPage';
 import SuppliersPage from './pages/SuppliersPage';
 import PurchaseOrdersPage from './pages/PurchaseOrdersPage';
 import ReceivingPage from './pages/ReceivingPage';
+import PutawayPage from './pages/PutawayPage';
+import StockOpnamePage from './pages/StockOpnamePage';
+import MoveStockPage from './pages/MoveStockPage';
 
 function ProtectedRoute({ children, adminOnly = false }) {
   const { user, loading } = useAuth();
@@ -51,6 +54,11 @@ export default function App() {
           <Route path="suppliers"    element={<SuppliersPage />} />
           <Route path="purchase-orders" element={<PurchaseOrdersPage />} />
           <Route path="receiving"    element={<ReceivingPage />} />
+
+          {/* WMS Milestone 2 — Scan-based Operations */}
+          <Route path="putaway"      element={<PutawayPage />} />
+          <Route path="stock-opname" element={<StockOpnamePage />} />
+          <Route path="move-stock"   element={<MoveStockPage />} />
 
           {/* Redirect old items link to products */}
           <Route path="items"         element={<Navigate to="/products" replace />} />

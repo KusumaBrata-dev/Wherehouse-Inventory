@@ -1,313 +1,374 @@
-import { useState, useEffect } from "react";
-import { getPurchaseOrders, getPurchaseOrder, receivePurchaseOrder } from "../services/api";
-import { PackagePlus, Search, Box, ChevronRight, CheckCircle2, AlertCircle, Save, Package, MapPin } from "lucide-react";
-import LocationPickerModal from "../components/LocationPickerModal";
+import { useState, useEffect, useCallback } from "react";
+import {
+  PackagePlus, Search, CheckCircle2, AlertCircle, Save, Package,
+  ClipboardList, Plus, Trash2, ChevronDown, ChevronUp, Loader2
+} from "lucide-react";
+import api, { getProducts, getPurchaseOrders, receivePurchaseOrder, directInbound } from "../services/api";
 
-export default function ReceivingPage() {
-  const [pendingPos, setPendingPos] = useState([]);
-  const [selectedPo, setSelectedPo] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [receivingProducts, setReceivingProducts] = useState([]);
-  const [success, setSuccess] = useState(false);
-  const [showLocationPicker, setShowLocationPicker] = useState(false);
-  const [activeRowIndex, setActiveRowIndex] = useState(null);
+// ── Product Search Dropdown ───────────────────────────────────────────────
+function ProductSearch({ value, onChange }) {
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState([]);
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    fetchPOs();
+  const search = useCallback(async (q) => {
+    if (!q.trim()) { setResults([]); return; }
+    setLoading(true);
+    try {
+      const res = await api.get(`/products?search=${encodeURIComponent(q)}&limit=10`);
+      setResults(res.data.products || []);
+      setOpen(true);
+    } catch { setResults([]); }
+    finally { setLoading(false); }
   }, []);
 
-  const fetchPOs = async () => {
+  useEffect(() => {
+    const t = setTimeout(() => search(query), 300);
+    return () => clearTimeout(t);
+  }, [query, search]);
+
+  const select = (p) => {
+    onChange({ productId: p.id, productName: p.name, sku: p.sku, unit: p.unit });
+    setQuery(`[${p.sku}] ${p.name}`);
+    setOpen(false);
+  };
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--bg-input)', border: '1px solid var(--border)', borderRadius: 8, padding: '0 12px' }}>
+        {loading ? <Loader2 size={14} className="spin" /> : <Search size={14} style={{ opacity: 0.5 }} />}
+        <input
+          value={value?.productId ? `[${value.sku}] ${value.productName}` : query}
+          onChange={e => { setQuery(e.target.value); onChange(null); }}
+          onFocus={() => query && setOpen(true)}
+          placeholder="Cari produk (sku / nama)..."
+          style={{ background: 'transparent', border: 'none', outline: 'none', padding: '10px 0', flex: 1, color: 'var(--text-white)', fontSize: 14 }}
+        />
+        {value?.productId && (
+          <button onClick={() => { onChange(null); setQuery(''); }} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 4 }}>
+            <Trash2 size={13} />
+          </button>
+        )}
+      </div>
+      {open && results.length > 0 && (
+        <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 50, background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 8, boxShadow: '0 8px 32px rgba(0,0,0,0.4)', maxHeight: 240, overflowY: 'auto', marginTop: 4 }}>
+          {results.map(p => (
+            <div key={p.id} onClick={() => select(p)} style={{ padding: '10px 14px', cursor: 'pointer', borderBottom: '1px solid var(--border-light)', transition: 'background 0.15s' }}
+              onMouseEnter={e => e.currentTarget.style.background = 'rgba(99,102,241,0.1)'}
+              onMouseLeave={e => e.currentTarget.style.background = ''}
+            >
+              <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text-white)' }}>{p.name}</div>
+              <div style={{ fontSize: 11, color: 'var(--primary-light)' }}>{p.sku} · {p.unit}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main InboundPage ─────────────────────────────────────────────────────
+export default function ReceivingPage() {
+  const [mode, setMode] = useState('direct'); // 'direct' | 'po'
+  const [items, setItems] = useState([{ product: null, quantity: 1, lotNumber: '' }]);
+  const [note, setNote] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [success, setSuccess] = useState(null); // { boxCode, count }
+  const [error, setError] = useState('');
+
+  // PO mode states
+  const [pendingPos, setPendingPos] = useState([]);
+  const [selectedPo, setSelectedPo] = useState(null);
+  const [poLoading, setPoLoading] = useState(false);
+  const [poItems, setPoItems] = useState([]);
+  const [showPoList, setShowPoList] = useState(false);
+
+  // Load POs lazily only when user switches to PO mode
+  useEffect(() => {
+    if (mode === 'po' && pendingPos.length === 0) {
+      setPoLoading(true);
+      getPurchaseOrders()
+        .then(data => setPendingPos(data.filter(p => p.status === 'PENDING')))
+        .catch(() => {})
+        .finally(() => setPoLoading(false));
+    }
+  }, [mode]);
+
+  const addRow = () => setItems(prev => [...prev, { product: null, quantity: 1, lotNumber: '' }]);
+  const removeRow = (i) => setItems(prev => prev.filter((_, idx) => idx !== i));
+  const updateRow = (i, field, val) => {
+    setItems(prev => prev.map((row, idx) => idx === i ? { ...row, [field]: val } : row));
+  };
+
+  // === DIRECT INBOUND SUBMIT ===
+  const handleDirectSubmit = async () => {
+    const validItems = items.filter(it => it.product?.productId && parseInt(it.quantity) > 0);
+    if (validItems.length === 0) {
+      setError('Minimal satu produk dengan jumlah valid harus diisi.');
+      return;
+    }
+    setLoading(true); setError('');
     try {
-      const data = await getPurchaseOrders();
-      setPendingPos(data.filter(po => po.status === 'PENDING'));
+      const payload = {
+        note: note || undefined,
+        items: validItems.map(it => ({
+          productId: it.product.productId,
+          quantity: parseInt(it.quantity),
+          lotNumber: it.lotNumber || '',
+        }))
+      };
+      const res = await directInbound(payload);
+      setSuccess({ boxCode: res.boxCode, count: validItems.length });
     } catch (err) {
-      console.error("Failed to fetch POs");
+      setError(err.response?.data?.error || 'Gagal memproses inbound. Coba lagi.');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleOpenPicker = (index) => {
-    setActiveRowIndex(index);
-    setShowLocationPicker(true);
-  };
-
-  const handleLocationSelect = (box, selection) => {
-    const newProducts = [...receivingProducts];
-    const path = `${selection.floor.name} > R${selection.rack.letter} > L${selection.level.number} > ${selection.pallet.code} > ${box.code}`;
-    newProducts[activeRowIndex].boxId = box.id;
-    newProducts[activeRowIndex].boxPath = path;
-    newProducts[activeRowIndex].boxCode = box.code;
-    setReceivingProducts(newProducts);
-    setShowLocationPicker(false);
+  // === PO INBOUND SUBMIT ===
+  const handlePoSubmit = async () => {
+    const valid = poItems.filter(it => it.boxId);
+    if (valid.length < poItems.length) {
+      setError('Mohon pilih Lokasi Box untuk setiap produk.');
+      return;
+    }
+    setLoading(true); setError('');
+    try {
+      await receivePurchaseOrder(selectedPo.id, { products: poItems });
+      setSuccess({ boxCode: 'Dari PO', count: poItems.length });
+    } catch (err) {
+      setError(err.response?.data?.error || 'Gagal memproses PO.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleSelectPo = async (po) => {
+    setPoLoading(true);
     try {
-      setLoading(true);
-      const fullPo = await getPurchaseOrder(po.id);
-      setSelectedPo(fullPo);
-      setReceivingProducts(fullPo.products.map(it => ({
+      const res = await api.get(`/purchase-orders/${po.id}`);
+      setSelectedPo(res.data);
+      setPoItems(res.data.products.map(it => ({
         productId: it.productId,
         quantity: it.quantity,
-        boxId: "",
-        boxPath: "",
-        boxCode: "",
+        boxId: '',
         productName: it.product.name,
         sku: it.product.sku,
-        description: it.description
       })));
-    } catch (err) {
-      alert("Gagal memuat detail PO");
-    } finally {
-      setLoading(false);
-    }
+      setShowPoList(false);
+    } catch { setError('Gagal memuat detail PO.'); }
+    finally { setPoLoading(false); }
   };
 
-  const handleProductChange = (index, field, value) => {
-    const newProducts = [...receivingProducts];
-    newProducts[index][field] = value;
-    setReceivingProducts(newProducts);
+  const resetAll = () => {
+    setSuccess(null); setError(''); setNote('');
+    setItems([{ product: null, quantity: 1, lotNumber: '' }]);
+    setSelectedPo(null); setPoItems([]);
   };
 
-  const handleReceive = async () => {
-    if (receivingProducts.some(it => !it.boxId)) {
-      alert("Mohon pilih Lokasi Box untuk setiap produk.");
-      return;
-    }
-
-    try {
-      setLoading(true);
-      await receivePurchaseOrder(selectedPo.id, { products: receivingProducts });
-      setSuccess(true);
-      setSelectedPo(null);
-      fetchPOs();
-    } catch (err) {
-      alert(err.response?.data?.error || "Gagal memproses penerimaan");
-    } finally {
-      setLoading(false);
-    }
-  };
-
+  // ── SUCCESS STATE ─────────────────────────────────────────────────────
   if (success) {
     return (
       <div className="page-container fadeIn" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '70vh', textAlign: 'center' }}>
-        <div className="success-icon-large scaleIn" style={{ background: 'rgba(34, 197, 94, 0.1)', color: '#22c55e', padding: 30, borderRadius: '50%', marginBottom: 24 }}>
+        <div style={{ background: 'rgba(16,185,129,0.1)', color: '#10b981', padding: 32, borderRadius: '50%', marginBottom: 24 }}>
           <CheckCircle2 size={80} />
         </div>
-        <h1 style={{ fontSize: 32, fontWeight: 800, marginBottom: 16 }}>Penerimaan Berhasil!</h1>
-        <p style={{ fontSize: 18, opacity: 0.7, marginBottom: 40, maxWidth: 500 }}>
-          Stok telah diperbarui dan transaksi masuk telah dicatat dengan aman di dalam sistem.
+        <h1 style={{ fontSize: 32, fontWeight: 800, marginBottom: 12 }}>Inbound Berhasil!</h1>
+        <p style={{ opacity: 0.7, marginBottom: 8 }}>{success.count} produk telah masuk ke <strong>Incoming Area</strong></p>
+        {success.boxCode !== 'Dari PO' && (
+          <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 24px', marginBottom: 32, fontFamily: 'monospace', fontSize: 18, color: 'var(--primary-light)' }}>
+            Box: {success.boxCode}
+          </div>
+        )}
+        <p style={{ opacity: 0.5, fontSize: 13, marginBottom: 32 }}>
+          Lanjutkan ke menu <strong>Putaway</strong> untuk memindahkan barang ke rak penyimpanan.
         </p>
-        <button className="btn btn-primary btn-lg" style={{ padding: '16px 40px', fontSize: 16 }} onClick={() => setSuccess(false)}>
-          Terima Purchase Order Lainnya
-        </button>
+        <div style={{ display: 'flex', gap: 12 }}>
+          <button className="btn btn-primary btn-lg" onClick={resetAll}>
+            <PackagePlus size={18} /> Inbound Berikutnya
+          </button>
+          <a href="/putaway" className="btn btn-outline btn-lg">Ke Putaway →</a>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="page-container fadeIn">
-      <div className="page-header" style={{ marginBottom: 32 }}>
+      {/* Header */}
+      <div className="page-header" style={{ marginBottom: 24 }}>
         <div className="header-info">
-          <div className="header-icon-box">
-            <PackagePlus size={24} />
-          </div>
+          <div className="header-icon-box"><PackagePlus size={24} /></div>
           <div>
-            <h1 className="page-title">Terima Produk (Inbound)</h1>
-            <p className="page-subtitle">Konfirmasi kedatangan produk dan tentukan lokasi penyimpanan di rak.</p>
+            <h1 className="page-title">Inbound — Terima Barang</h1>
+            <p className="page-subtitle">Catat kedatangan barang ke Incoming Area (staging) sebelum di-putaway ke rak.</p>
           </div>
         </div>
       </div>
 
-      <div className="receiving-split">
-        {/* LEFT: PO Selection */}
-        <div className="po-selector-list">
-          <h3 className="section-title">Pilih Purchase Order</h3>
-          {loading && !selectedPo ? (
-            <div className="spinner-margin" />
-          ) : (
-            <div className="po-cards-grid">
-              {pendingPos.map(po => (
-                <div 
-                  key={po.id} 
-                  className={`card po-selection-card ${selectedPo?.id === po.id ? 'active' : ''}`}
-                  onClick={() => handleSelectPo(po)}
-                >
-                  <div className="po-number">{po.poNumber}</div>
-                  <div className="po-supplier">{po.supplier.name}</div>
-                  <div className="po-meta">
-                    <span>{po.products.length} Produk</span>
-                    <span>•</span>
-                    <span>{new Date(po.createdAt).toLocaleDateString()}</span>
-                  </div>
-                  <ChevronRight className="arrow" />
-                </div>
-              ))}
-              {pendingPos.length === 0 && <div className="empty-mini">Tidak ada PO yang menunggu.</div>}
-            </div>
-          )}
-        </div>
-
-        {/* RIGHT: Receiving Form */}
-        <div className="receiving-form-area">
-          {selectedPo ? (
-            <div className="card fadeIn">
-              <div className="card-header-wms">
-                <div className="flex-col">
-                  <h2>Detail Konfirmasi: {selectedPo.poNumber}</h2>
-                  <p>Asal: {selectedPo.supplier.name}</p>
-                </div>
-                <div className="status-label">PENDING</div>
-              </div>
-
-              <div className="receiving-items-table">
-                {receivingProducts.map((it, idx) => (
-                  <div key={idx} className="receiving-row">
-                    <div className="item-meta">
-                      <div className="sku">{it.sku}</div>
-                      <div className="name" style={{ fontWeight: 600 }}>{it.productName}</div>
-                      {it.description && (
-                        <div className="manual-desc" style={{ fontSize: 11, color: 'var(--primary)', fontStyle: 'italic', marginTop: 2 }}>
-                          PO Desc: {it.description}
-                        </div>
-                      )}
-                    </div>
-                    
-                    <div className="qty-input">
-                      <label>Jml Diterima</label>
-                      <input 
-                        type="number" 
-                        value={it.quantity} 
-                        onChange={(e) => handleProductChange(idx, 'quantity', e.target.value)}
-                        min="1"
-                      />
-                    </div>
-
-                    <div className="box-input" style={{ flex: 1.5 }}>
-                      <label>Lokasi Simpan (Pallet & Box)</label>
-                      {it.boxId ? (
-                        <div className="selected-path-box fadeIn" onClick={() => handleOpenPicker(idx)}>
-                          <div className="path-text">{it.boxPath}</div>
-                          <div className="box-code-badge"><MapPin size={12} /> {it.boxCode}</div>
-                        </div>
-                      ) : (
-                        <button className="btn btn-outline btn-dashed w-full" onClick={() => handleOpenPicker(idx)} style={{ height: 44 }}>
-                           Tentukan Lokasi
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="card-footer" style={{ marginTop: 24, padding: 0, border: 'none' }}>
-                <div className="alert-info-box">
-                  <AlertCircle size={18} />
-                  <span>Pastikan jumlah fisik produk sesuai dengan yang Anda input di atas.</span>
-                </div>
-                <button 
-                   className="btn btn-primary w-full" 
-                  style={{ marginTop: 16, height: 50 }}
-                  onClick={handleReceive}
-                  disabled={loading}
-                >
-                  {loading ? <div className="spinner-mini" /> : <><Save size={20} /> Konfirmasi Penerimaan & Update Stok</>}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="empty-receiving-placeholder">
-              <Package size={48} />
-              <p>Pilih Purchase Order di sebelah kiri untuk memulai proses penerimaan.</p>
-            </div>
-          )}
-        </div>
+      {/* Mode Toggle */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 28 }}>
+        <button
+          className={`btn ${mode === 'direct' ? 'btn-primary' : 'btn-ghost'}`}
+          style={{ flex: 1 }}
+          onClick={() => setMode('direct')}
+        >
+          <Package size={16} /> Input Langsung
+        </button>
+        <button
+          className={`btn ${mode === 'po' ? 'btn-primary' : 'btn-ghost'}`}
+          style={{ flex: 1 }}
+          onClick={() => setMode('po')}
+        >
+          <ClipboardList size={16} /> Dari Purchase Order
+        </button>
       </div>
 
-      {showLocationPicker && (
-        <LocationPickerModal 
-          isOpen={showLocationPicker}
-          onClose={() => setShowLocationPicker(false)}
-          onSelect={handleLocationSelect}
-        />
+      {/* Error */}
+      {error && (
+        <div className="alert alert-error" style={{ marginBottom: 20 }}>
+          <AlertCircle size={16} /> {error}
+        </div>
       )}
 
-      <style>{`
-        .receiving-split {
-          display: grid;
-          grid-template-columns: 350px 1fr;
-          gap: 32px;
-          min-height: 600px;
-        }
-        .section-title { font-size: 14px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 16px; letter-spacing: 1px; }
-        .po-cards-grid { display: grid; gap: 12px; }
-        .po-selection-card {
-           padding: 20px;
-           position: relative;
-           cursor: pointer;
-           border: 1px solid var(--border);
-           transition: all 0.2s;
-        }
-        .po-selection-card:hover { border-color: var(--primary-light); background: rgba(99,102,241,0.05); }
-        .po-selection-card.active { border-color: var(--primary); background: rgba(99,102,241,0.1); border-width: 2px; }
-        .po-number { font-weight: 700; color: var(--text-white); margin-bottom: 4px; }
-        .po-supplier { font-size: 13px; color: var(--text-muted); margin-bottom: 8px; }
-        .po-meta { font-size: 12px; opacity: 0.6; display: flex; gap: 8px; }
-        .po-selection-card .arrow { position: absolute; right: 20px; top: 50%; transform: translateY(-50%); opacity: 0; transition: all 0.2s; }
-        .po-selection-card:hover .arrow { opacity: 1; right: 15px; }
-        
-        .card-header-wms { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
-        .status-label { background: rgba(245, 158, 11, 0.1); color: #f59e0b; padding: 4px 12px; border-radius: 4px; font-size: 12px; font-weight: 700; }
-        
-        .receiving-row {
-          display: grid;
-          grid-template-columns: 2fr 120px 1.5fr;
-          gap: 20px;
-          padding: 16px;
-          background: rgba(255,255,255,0.02);
-          border-radius: 8px;
-          margin-bottom: 12px;
-          align-items: flex-end;
-          border: 1px solid var(--border-light);
-        }
-        .item-meta .sku { font-size: 11px; font-weight: 700; color: var(--primary-light); }
-        .item-meta .name { font-size: 15px; color: var(--text-white); font-weight: 500; }
-        .qty-input label, .box-input label { display: block; font-size: 11px; color: var(--text-muted); margin-bottom: 6px; }
-        
-        .empty-receiving-placeholder {
-          height: 100%;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          opacity: 0.3;
-          border: 2px dashed var(--border);
-          border-radius: 16px;
-          text-align: center;
-          padding: 40px;
-        }
-        .empty-mini { opacity: 0.5; font-size: 13px; padding: 20px; text-align: center; }
-        .alert-info-box { display: flex; align-items: center; gap: 12px; background: rgba(59, 130, 246, 0.1); color: #60a5fa; padding: 12px; border-radius: 8px; font-size: 13px; }
-        
-        .selected-path-box {
-          background: rgba(99, 102, 241, 0.05);
-          border: 1px solid var(--primary);
-          border-radius: 8px;
-          padding: 8px 12px;
-          cursor: pointer;
-          transition: all 0.2s;
-        }
-        .selected-path-box:hover { background: rgba(99, 102, 241, 0.1); }
-        .path-text { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
-        .box-code-badge { font-size: 13px; font-weight: 700; color: var(--primary-light); display: flex; align-items: center; gap: 6px; }
-        .btn-dashed { border: 1px dashed var(--border); color: var(--text-muted); }
-        .btn-dashed:hover { border-color: var(--primary); color: var(--primary-light); }
+      {/* ═══ DIRECT MODE ═══ */}
+      {mode === 'direct' && (
+        <div className="card">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+            <h3 style={{ margin: 0, fontWeight: 700 }}>Daftar Produk Masuk</h3>
+            <button className="btn btn-outline btn-sm" onClick={addRow}>
+              <Plus size={14} /> Tambah Baris
+            </button>
+          </div>
 
-        @media (max-width: 1024px) {
-          .receiving-split { grid-template-columns: 1fr; }
-        }
-      `}</style>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {items.map((row, i) => (
+              <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 100px 140px auto', gap: 10, alignItems: 'center', background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border-light)', borderRadius: 10, padding: '12px 14px' }}>
+                <div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 5 }}>Produk</div>
+                  <ProductSearch value={row.product} onChange={(p) => updateRow(i, 'product', p)} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 5 }}>Jumlah</div>
+                  <input
+                    type="number" min="1" value={row.quantity}
+                    onChange={e => updateRow(i, 'quantity', e.target.value)}
+                    style={{ width: '100%', background: 'var(--bg-input)', border: '1px solid var(--border)', borderRadius: 8, padding: '9px 12px', color: 'var(--text-white)', fontSize: 14 }}
+                  />
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 5 }}>No. Lot (opsional)</div>
+                  <input
+                    type="text" value={row.lotNumber} placeholder="e.g. LOT-001"
+                    onChange={e => updateRow(i, 'lotNumber', e.target.value)}
+                    style={{ width: '100%', background: 'var(--bg-input)', border: '1px solid var(--border)', borderRadius: 8, padding: '9px 12px', color: 'var(--text-white)', fontSize: 14 }}
+                  />
+                </div>
+                <button onClick={() => removeRow(i)} disabled={items.length === 1}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#f43f5e', padding: 8, opacity: items.length === 1 ? 0.3 : 1 }}>
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* Note */}
+          <div style={{ marginTop: 16 }}>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 5 }}>Catatan (opsional)</div>
+            <input
+              type="text" value={note} onChange={e => setNote(e.target.value)}
+              placeholder="Contoh: Kiriman dari Toko Maju, surat jalan #001"
+              style={{ width: '100%', background: 'var(--bg-input)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 14px', color: 'var(--text-white)', fontSize: 14, boxSizing: 'border-box' }}
+            />
+          </div>
+
+          {/* Info box */}
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.2)', borderRadius: 8, padding: '10px 14px', marginTop: 16, fontSize: 13, color: '#10b981' }}>
+            <AlertCircle size={16} style={{ flexShrink: 0 }} />
+            <span>Barang akan masuk ke <strong>Incoming Area</strong> dengan status <strong>RECEIVED</strong>. Lanjutkan dengan Putaway untuk memindahkan ke rak.</span>
+          </div>
+
+          <button
+            className="btn btn-primary w-full"
+            style={{ marginTop: 20, height: 50, fontSize: 15 }}
+            onClick={handleDirectSubmit}
+            disabled={loading}
+          >
+            {loading ? <><Loader2 size={18} className="spin" /> Memproses...</> : <><Save size={18} /> Konfirmasi Inbound ke INCOMING</>}
+          </button>
+        </div>
+      )}
+
+      {/* ═══ PO MODE ═══ */}
+      {mode === 'po' && (
+        <div>
+          {/* PO Selector */}
+          <div className="card" style={{ marginBottom: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }} onClick={() => setShowPoList(!showPoList)}>
+              <div>
+                <div style={{ fontWeight: 700 }}>
+                  {selectedPo ? `PO: ${selectedPo.poNumber}` : 'Pilih Purchase Order'}
+                </div>
+                {selectedPo && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>Supplier: {selectedPo.supplier?.name}</div>}
+              </div>
+              {showPoList ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+            </div>
+
+            {showPoList && (
+              <div style={{ marginTop: 16, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+                {poLoading ? (
+                  <div style={{ textAlign: 'center', padding: 20 }}><Loader2 size={24} className="spin" /></div>
+                ) : pendingPos.length === 0 ? (
+                  <div style={{ opacity: 0.5, textAlign: 'center', padding: 20, fontSize: 13 }}>Tidak ada Purchase Order yang menunggu.</div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {pendingPos.map(po => (
+                      <div key={po.id} onClick={() => handleSelectPo(po)}
+                        style={{ padding: '14px 16px', border: `1px solid ${selectedPo?.id === po.id ? 'var(--primary)' : 'var(--border)'}`, borderRadius: 8, cursor: 'pointer', background: selectedPo?.id === po.id ? 'rgba(99,102,241,0.1)' : 'transparent', transition: 'all 0.2s' }}>
+                        <div style={{ fontWeight: 700 }}>{po.poNumber}</div>
+                        <div style={{ fontSize: 12, opacity: 0.6, marginTop: 2 }}>{po.supplier?.name} · {po.products?.length} produk · {new Date(po.createdAt).toLocaleDateString('id-ID')}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* PO Items */}
+          {selectedPo && poItems.length > 0 && (
+            <div className="card">
+              <h3 style={{ marginBottom: 16 }}>Produk dalam {selectedPo.poNumber}</h3>
+              {poItems.map((it, idx) => (
+                <div key={idx} style={{ display: 'grid', gridTemplateColumns: '1fr 100px', gap: 12, padding: '12px 14px', background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border-light)', borderRadius: 8, marginBottom: 10, alignItems: 'center' }}>
+                  <div>
+                    <div style={{ fontWeight: 600 }}>{it.productName}</div>
+                    <div style={{ fontSize: 11, color: 'var(--primary-light)' }}>{it.sku}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>Jumlah</div>
+                    <input type="number" min="1" value={it.quantity}
+                      onChange={e => setPoItems(prev => prev.map((r, i) => i === idx ? { ...r, quantity: e.target.value } : r))}
+                      style={{ width: '100%', background: 'var(--bg-input)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px', color: 'var(--text-white)', fontSize: 14 }}
+                    />
+                  </div>
+                </div>
+              ))}
+
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center', background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.2)', borderRadius: 8, padding: '10px 14px', marginTop: 12, fontSize: 13, color: '#60a5fa' }}>
+                <AlertCircle size={16} style={{ flexShrink: 0 }} />
+                <span>Penerimaan via PO akan mencatat transaksi IN dan memperbarui stok. Barang masuk ke Incoming Area.</span>
+              </div>
+
+              <button className="btn btn-primary w-full" style={{ marginTop: 16, height: 50 }} onClick={handlePoSubmit} disabled={loading}>
+                {loading ? <><Loader2 size={18} className="spin" /> Memproses...</> : <><Save size={18} /> Terima PO & Masuk Incoming</>}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

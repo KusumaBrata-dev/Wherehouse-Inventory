@@ -123,65 +123,6 @@ export default function LoginPage() {
           </button>
         </form>
 
-        <div
-          style={{
-            marginTop: 24,
-            padding: "16px",
-            background: "var(--bg-surface)",
-            borderRadius: "var(--radius)",
-            border: "1px solid var(--border)",
-          }}
-        >
-          <p
-            style={{
-              fontSize: 11,
-              color: "var(--text-muted)",
-              marginBottom: 8,
-              textTransform: "uppercase",
-              letterSpacing: "0.5px",
-              fontWeight: 600,
-            }}
-          >
-            Default Login (Development)
-          </p>
-          {[
-            { user: "admin", pass: "admin123", role: "ADMIN" },
-            { user: "ppic", pass: "ppic123", role: "PPIC" },
-            { user: "gudang", pass: "staff123", role: "STAFF" },
-          ].map((a) => (
-            <button
-              key={a.user}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                width: "100%",
-                background: "none",
-                border: "none",
-                padding: "4px 0",
-                cursor: "pointer",
-                textAlign: "left",
-              }}
-              onClick={() => {
-                setUsername(a.user);
-                setPassword(a.pass);
-              }}
-            >
-              <span
-                style={{
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 12,
-                  color: "var(--text-secondary)",
-                }}
-              >
-                {a.user}
-              </span>
-              <span className="badge badge-gray" style={{ fontSize: 10 }}>
-                {a.role}
-              </span>
-            </button>
-          ))}
-        </div>
       </div>
     </div>
   );
