@@ -129,16 +129,18 @@ model RackLevel {
 }
 
 model Pallet {
-  id          Int       @id @default(autoincrement())
-  code        String    @unique
+  id          Int             @id @default(autoincrement())
+  code        String          @unique
   name        String?
-  rackLevelId Int       @map("rack_level_id")
-  maxBoxes    Int       @default(80) @map("max_boxes")
-  createdAt   DateTime  @default(now())
+  rackLevelId Int             @map("rack_level_id")
+  maxBoxes    Int             @default(80) @map("max_boxes")
+  status      InventoryStatus @default(RECEIVED) @map("status")
+  createdAt   DateTime        @default(now())
   boxes       Box[]
-  rackLevel   RackLevel @relation(fields: [rackLevelId], references: [id], onDelete: Cascade)
+  rackLevel   RackLevel       @relation(fields: [rackLevelId], references: [id], onDelete: Cascade)
 
   @@index([rackLevelId])
+  @@index([status])
   @@map("pallets")
 }
 
@@ -248,6 +250,7 @@ model Transaction {
 enum InventoryStatus {
   RECEIVED
   STORED
+  LOCKED
 }
 
 enum Role {

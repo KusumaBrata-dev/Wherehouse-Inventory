@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react';
-import { Search, ScanLine, ArrowRight, CheckCircle, Package, MapPin, Loader2, RotateCcw, ChevronRight, Inbox } from 'lucide-react';
+import { Search, ScanLine, ArrowRight, CheckCircle, Package, MapPin, Loader2, RotateCcw, ChevronRight, Inbox, AlertTriangle, Info } from 'lucide-react';
 import api from '../services/api';
+import BarcodeScanner from '../components/BarcodeScanner';
 
 const STATUS = {
   IDLE: 'idle',
@@ -22,6 +23,9 @@ export default function PutawayPage() {
   const [error, setError] = useState('');
   const [suggestions, setSuggestions] = useState([]);
   const [result, setResult] = useState(null);
+  const [isScannerOpen, setIsScannerOpen] = useState(false);
+  const [scannerMode, setScannerMode] = useState('item');
+
   const itemRef = useRef(null);
   const destRef = useRef(null);
 
@@ -37,121 +41,119 @@ export default function PutawayPage() {
     setTimeout(() => itemRef.current?.focus(), 100);
   };
 
-  // Step 1: Scan item at Incoming Area
-  const handleScanItem = async (e) => {
-    e.preventDefault();
-    if (!itemCode.trim()) return;
+  const handleScanItem = async (code) => {
+    const rawCode = typeof code === 'string' ? code : itemCode;
+    if (!rawCode?.trim()) return;
+
     setStatus(STATUS.SCANNING_ITEM);
     setError('');
+    setIsScannerOpen(false);
+
     try {
-      const res = await api.get(`/scan/${encodeURIComponent(itemCode.trim())}`);
+      const res = await api.get(`/scan/${encodeURIComponent(rawCode.trim())}`);
       const data = res.data;
 
-      if (!['pallet', 'box'].includes(data.type)) {
-        setError(`Kode ini adalah ${data.type === 'product' ? 'SKU Produk' : data.type}. Scan kode Pallet atau Box yang ada di Incoming Area.`);
-        setStatus(STATUS.IDLE);
-        return;
+      if (data.type !== 'pallet' && data.type !== 'box') {
+        throw new Error(`Item "${rawCode}" adalah ${data.type}. Scan Pallet atau Box untuk memulai Putaway.`);
       }
 
-      // Warn if item is already STORED (not in INCOMING)
+      if (data.location?.floor !== 'Incoming Area') {
+        throw new Error(`Item ${data.code} sudah berada di rak (${data.location?.fullCode}). Gunakan "Pindah Stok" untuk relokasi.`);
+      }
+
+      if (data.status === 'LOCKED') {
+        throw new Error(`Item ${data.code} sedang dikunci oleh sesi Inbound aktif.`);
+      }
       if (data.status === 'STORED') {
-        setError(`Item ${data.code} sudah tersimpan di rak (${data.location?.fullCode || 'lokasi diketahui'}). Gunakan menu "Pindah Stok" untuk relokasi.`);
-        setStatus(STATUS.IDLE);
-        return;
+        throw new Error(`Item ${data.code} sudah berstatus STORED.`);
       }
 
       setItemData(data);
       setStatus(STATUS.ITEM_FOUND);
 
-      // Load auto-suggest locations (excludes Incoming Area automatically)
+      // AUTOMATIC: Open Step 2 scanner immediately after Item is found
+      setTimeout(() => openScanner('dest'), 600);
+
       try {
         const sugRes = await api.get('/locations/suggest');
         if (sugRes.data.available) {
           setSuggestions([sugRes.data]);
         }
-      } catch {
-        // Suggestions are optional
-      }
+      } catch (e) {}
 
       setTimeout(() => destRef.current?.focus(), 200);
     } catch (err) {
-      setError(err.response?.data?.error || 'Item tidak ditemukan. Pastikan kode benar.');
+      setError(err.response?.data?.error || err.message || 'Item tidak ditemukan.');
       setStatus(STATUS.IDLE);
     }
   };
 
-  // Step 2: Scan destination location
-  const handleScanDest = async (e) => {
-    e.preventDefault();
-    if (!destCode.trim()) return;
+  const handleScanDest = async (code) => {
+    const rawCode = typeof code === 'string' ? code : destCode;
+    if (!rawCode?.trim()) return;
+
     setStatus(STATUS.SCANNING_DEST);
     setError('');
+    setIsScannerOpen(false);
+
     try {
-      const res = await api.get(`/scan/${encodeURIComponent(destCode.trim())}`);
+      const res = await api.get(`/scan/${encodeURIComponent(rawCode.trim())}`);
       const data = res.data;
 
       if (data.type !== 'level') {
-        setError(`"${destCode}" bukan kode lokasi yang valid. Gunakan format L1-A-03-02 atau scan QR rak.`);
-        setStatus(STATUS.ITEM_FOUND);
-        setDestCode('');
-        return;
+        throw new Error(`"${rawCode}" bukan kode rak yang valid.`);
       }
 
-      if (data.palletCount > 0) {
-        setError(`Lokasi ${data.code} sudah berisi ${data.palletCount} pallet. Pilih lokasi yang kosong.`);
-        setStatus(STATUS.ITEM_FOUND);
-        setDestCode('');
-        return;
+      if (data.palletCount >= (data.capacity || 20)) {
+        throw new Error(`Lokasi ${data.code} sudah penuh.`);
+      }
+
+      if (data.id === itemData.rackLevelId) {
+        throw new Error('Lokasi tujuan sama dengan lokasi saat ini.');
       }
 
       setDestData(data);
+      setDestCode(data.code);
       setStatus(STATUS.DEST_FOUND);
+
+      // AUTOMATIC: Trigger move immediately after destination is scanned (Fast Mode)
+      // Small delay so the user sees the "Dest Found" screen for a split second
+      setTimeout(() => {
+        handleConfirmMove(data.id);
+      }, 500);
     } catch (err) {
-      setError(err.response?.data?.error || 'Lokasi tidak ditemukan.');
+      setError(err.response?.data?.error || err.message || 'Lokasi tidak ditemukan.');
       setStatus(STATUS.ITEM_FOUND);
       setDestCode('');
     }
   };
 
-  // Step 3: Confirm move (Putaway)
-  const handleConfirmMove = async () => {
-    if (!itemData || !destData) return;
+  const handleConfirmMove = async (targetId) => {
+    // Use targetId if provided (auto-flow), else use destData.id (manual button click)
+    const finalTargetId = targetId || destData?.id;
+    if (!itemData || !finalTargetId || status === STATUS.MOVING) return;
+
     setStatus(STATUS.MOVING);
     setError('');
     try {
-      // Resolve palletId — whether scanning a pallet or a box
-      let palletId;
-      if (itemData.type === 'pallet') {
-        palletId = itemData.id;
-      } else if (itemData.type === 'box') {
-        // Box data from /scan includes palletId
-        palletId = itemData.palletId;
-        if (!palletId) {
-          setError('Box ini tidak terkait pallet. Scan kode Pallet-nya langsung.');
-          setStatus(STATUS.DEST_FOUND);
-          return;
-        }
-      }
-
-      await api.patch(`/locations/pallets/${palletId}/move`, {
-        newLevelId: destData.id
-      });
-
-      setResult({
-        item: itemData.code || itemData.name,
-        from: itemData.location?.fullCode || 'Incoming Area',
-        to: destData.code
-      });
+      const palletId = itemData.type === 'pallet' ? itemData.id : itemData.palletId;
+      await api.patch(`/locations/pallets/${palletId}/move`, { newLevelId: finalTargetId });
+      setResult({ item: itemData.code, from: 'Incoming Area', to: destCode || 'Rak' });
       setStatus(STATUS.DONE);
     } catch (err) {
-      setError(err.response?.data?.error || 'Gagal memindahkan. Coba lagi.');
+      setError(err.response?.data?.error || 'Gagal memindahkan pallet.');
       setStatus(STATUS.DEST_FOUND);
     }
   };
 
+  const openScanner = (mode) => {
+    setScannerMode(mode);
+    setIsScannerOpen(true);
+  };
+
   const useSuggestion = (sug) => {
-    setDestCode(sug.code || '');
-    destRef.current?.focus();
+    setDestCode(sug.code);
+    handleScanDest(sug.code);
   };
 
   return (
@@ -171,7 +173,6 @@ export default function PutawayPage() {
         )}
       </div>
 
-      {/* Progress Steps */}
       <div className="putaway-steps">
         <div className={`putaway-step ${[STATUS.SCANNING_ITEM, STATUS.ITEM_FOUND, STATUS.SCANNING_DEST, STATUS.DEST_FOUND, STATUS.MOVING, STATUS.DONE].includes(status) ? 'active' : ''} ${[STATUS.ITEM_FOUND, STATUS.SCANNING_DEST, STATUS.DEST_FOUND, STATUS.MOVING, STATUS.DONE].includes(status) ? 'done' : ''}`}>
           <div className="step-circle">1</div>
@@ -189,16 +190,14 @@ export default function PutawayPage() {
         </div>
       </div>
 
-      {/* Error Banner */}
       {error && (
         <div className="alert alert-error" style={{ marginBottom: 16 }}>
           {error}
         </div>
       )}
 
-      {/* DONE State */}
       {status === STATUS.DONE && result && (
-        <div className="putaway-success">
+        <div className="putaway-success animate-fade">
           <CheckCircle size={48} className="success-icon" />
           <h2>Putaway Berhasil!</h2>
           <div className="move-summary">
@@ -207,156 +206,130 @@ export default function PutawayPage() {
               <span className="move-code">{result.item}</span>
             </div>
             <div className="move-path">
-              <span className="from-loc">{result.from}</span>
+              <span className="from-loc">Incoming Area</span>
               <ArrowRight size={16} />
               <span className="to-loc">{result.to}</span>
             </div>
           </div>
-          <button className="btn btn-primary btn-lg" onClick={reset}>
+          <button className="btn btn-primary btn-lg" style={{ width: '100%' }} onClick={reset}>
             <ScanLine size={18} /> Putaway Berikutnya
           </button>
         </div>
       )}
 
-      {/* STEP 1: Scan Item */}
-      {![STATUS.DONE].includes(status) && (
-        <div className="putaway-card">
-          <div className="card-label">
-            <ScanLine size={16} />
-            <span>Langkah 1 — Scan Kode Pallet / Box di Incoming Area</span>
-          </div>
-          <form onSubmit={handleScanItem} className="scan-form">
-            <input
-              ref={itemRef}
-              className="scan-input"
-              placeholder="Scan atau ketik kode pallet/box..."
-              value={itemCode}
-              onChange={e => setItemCode(e.target.value)}
-              disabled={[STATUS.SCANNING_ITEM, STATUS.ITEM_FOUND, STATUS.SCANNING_DEST, STATUS.DEST_FOUND, STATUS.MOVING].includes(status)}
-              autoFocus
-            />
-            {![STATUS.ITEM_FOUND, STATUS.SCANNING_DEST, STATUS.DEST_FOUND, STATUS.MOVING].includes(status) && (
-              <button type="submit" className="btn btn-primary" disabled={status === STATUS.SCANNING_ITEM}>
-                {status === STATUS.SCANNING_ITEM ? <Loader2 size={16} className="spin" /> : <Search size={16} />}
-                Cari
-              </button>
-            )}
-          </form>
+      {status !== STATUS.DONE && (
+        <>
+          <div className="putaway-card">
+            <div className="card-label">
+              <ScanLine size={16} />
+              <span>Langkah 1 — Scan Kode Pallet / Box di Incoming Area</span>
+            </div>
+            <div className="scan-form">
+              <div style={{ flex: 1, position: 'relative' }}>
+                <input
+                  ref={itemRef}
+                  className="scan-input"
+                  placeholder="Scan atau ketik kode pallet/box..."
+                  value={itemCode}
+                  onChange={e => setItemCode(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && handleScanItem()}
+                  disabled={[STATUS.ITEM_FOUND, STATUS.SCANNING_DEST, STATUS.DEST_FOUND, STATUS.MOVING].includes(status)}
+                  autoFocus
+                />
+                <button 
+                  className="btn btn-primary" 
+                  style={{ position: 'absolute', right: 4, top: 4, height: 32, width: 32, padding: 0 }}
+                  onClick={() => openScanner('item')}
+                  disabled={[STATUS.ITEM_FOUND, STATUS.SCANNING_DEST, STATUS.DEST_FOUND, STATUS.MOVING].includes(status)}
+                >
+                  <ScanLine size={14} />
+                </button>
+              </div>
+            </div>
 
-          {/* Item Found Card */}
-          {itemData && (
-            <div className="found-card">
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <div className="found-badge">{itemData.type === 'pallet' ? '🪵 Pallet' : '📦 Box'}</div>
-                <span style={{
-                  fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 20,
-                  background: itemData.status === 'RECEIVED' ? 'rgba(16,185,129,0.15)' : 'rgba(99,102,241,0.15)',
-                  color: itemData.status === 'RECEIVED' ? '#10b981' : '#6366f1'
-                }}>
-                  {itemData.status === 'RECEIVED' ? '⏳ INCOMING' : '✅ STORED'}
-                </span>
+            {itemData && (
+              <div className="found-card animate-slide-up" style={{ marginTop: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div className="found-badge">{itemData.type === 'pallet' ? '🪵 Pallet' : '📦 Box'}</div>
+                  <span className="badge badge-primary">{itemData.status}</span>
+                </div>
+                <div className="found-code">{itemData.code}</div>
+                <div className="found-detail">
+                  {itemData.products?.length > 0 ? (
+                    <ul className="product-list">
+                      {itemData.products.map((p, idx) => (
+                        <li key={idx}>
+                          <span>{p.name} {p.lotNumber ? `[Lot: ${p.lotNumber}]` : ''}</span>
+                          <span className="qty-badge">{p.quantity} {p.unit}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : <span className="muted">Kosong</span>}
+                </div>
               </div>
-              <div className="found-code">{itemData.code}</div>
-              <div className="found-detail">
-                {itemData.products?.length > 0 ? (
-                  <ul className="product-list">
-                    {itemData.products.map(p => (
-                      <li key={p.productId}><span>{p.name}</span><span className="qty-badge">{p.quantity} {p.unit}</span></li>
+            )}
+          </div>
+
+          {[STATUS.ITEM_FOUND, STATUS.SCANNING_DEST, STATUS.DEST_FOUND, STATUS.MOVING].includes(status) && (
+            <div className="putaway-card animate-slide-up" style={{ marginTop: 20 }}>
+              <div className="card-label">
+                <MapPin size={16} />
+                <span>Langkah 2 — Scan Lokasi Tujuan (contoh: L1-A-03-02)</span>
+              </div>
+
+              {suggestions.length > 0 && !destData && (
+                <div className="suggestions">
+                  <span className="suggestions-label">💡 Rekomendasi:</span>
+                  <div className="suggestion-chips">
+                    {suggestions.map(s => (
+                      <button key={s.levelId} className="chip" onClick={() => useSuggestion(s)}>
+                        {s.code}
+                      </button>
                     ))}
-                  </ul>
-                ) : (
-                  <span className="muted">Tidak ada produk di dalam</span>
-                )}
+                  </div>
+                </div>
+              )}
+
+              <div className="scan-form">
+                <div style={{ flex: 1, position: 'relative' }}>
+                  <input
+                    ref={destRef}
+                    className="scan-input"
+                    placeholder="Scan QR lokasi rak..."
+                    value={destCode}
+                    onChange={e => setDestCode(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && handleScanDest()}
+                    disabled={status === STATUS.DEST_FOUND || status === STATUS.MOVING}
+                  />
+                  <button 
+                    className="btn btn-primary" 
+                    style={{ position: 'absolute', right: 4, top: 4, height: 32, width: 32, padding: 0 }}
+                    onClick={() => openScanner('dest')}
+                    disabled={status === STATUS.DEST_FOUND || status === STATUS.MOVING}
+                  >
+                    <ScanLine size={14} />
+                  </button>
+                </div>
               </div>
-              {itemData.location && (
-                <div className="found-location">
-                  <MapPin size={12} /> {itemData.location.fullPath || 'Incoming Area'}
+
+              {destData && (
+                <div className="found-card found-card-dest animate-fade" style={{ marginTop: 16 }}>
+                  <div className="found-badge dest-badge">📍 Lokasi</div>
+                  <div className="found-code">{destData.code}</div>
+                  <div className="found-detail muted">Kapasitas OK • {destData.floorName}</div>
                 </div>
               )}
             </div>
           )}
-        </div>
-      )}
 
-      {/* STEP 2: Scan Destination */}
-      {[STATUS.ITEM_FOUND, STATUS.SCANNING_DEST, STATUS.DEST_FOUND].includes(status) && (
-        <div className="putaway-card">
-          <div className="card-label">
-            <MapPin size={16} />
-            <span>Langkah 2 — Scan Lokasi Tujuan (contoh: L1-A-03-02)</span>
-          </div>
-
-          {/* Suggestions */}
-          {suggestions.length > 0 && !destData && (
-            <div className="suggestions">
-              <span className="suggestions-label">💡 Rekomendasi lokasi kosong:</span>
-              <div className="suggestion-chips">
-                {suggestions.map(s => (
-                  <button key={s.id} className="chip" onClick={() => useSuggestion(s)}>
-                    {s.path}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <form onSubmit={handleScanDest} className="scan-form">
-            <input
-              ref={destRef}
-              className="scan-input"
-              placeholder="Scan QR lokasi rak (L1-A-03-02)..."
-              value={destCode}
-              onChange={e => setDestCode(e.target.value)}
-              disabled={[STATUS.SCANNING_DEST, STATUS.DEST_FOUND, STATUS.MOVING].includes(status)}
-            />
-            {status !== STATUS.DEST_FOUND && (
-              <button type="submit" className="btn btn-primary" disabled={status === STATUS.SCANNING_DEST}>
-                {status === STATUS.SCANNING_DEST ? <Loader2 size={16} className="spin" /> : <Search size={16} />}
-                Verifikasi
+          {status === STATUS.DEST_FOUND && (
+            <div className="putaway-card putaway-confirm animate-bounce-in" style={{ marginTop: 20 }}>
+              <button className="btn btn-success btn-lg confirm-btn" style={{ width: '100%', height: 50 }} onClick={handleConfirmMove}>
+                <CheckCircle size={18} /> Konfirmasi Putaway
               </button>
-            )}
-          </form>
-
-          {/* Destination Found */}
-          {destData && (
-            <div className="found-card found-card-dest">
-              <div className="found-badge dest-badge">📍 Lokasi</div>
-              <div className="found-code">{destData.code}</div>
-              <div className="found-detail muted">{destData.floorName} — Kosong, siap diisi</div>
             </div>
           )}
-        </div>
-      )}
-
-      {/* STEP 3: Confirm Move */}
-      {status === STATUS.DEST_FOUND && itemData && destData && (
-        <div className="putaway-card putaway-confirm">
-          <div className="card-label">
-            <CheckCircle size={16} />
-            <span>Langkah 3 — Konfirmasi Pemindahan</span>
-          </div>
-          <div className="confirm-summary">
-            <div className="confirm-item">
-              <Package size={20} />
-              <div>
-                <div className="confirm-label">Item</div>
-                <div className="confirm-value">{itemData.code}</div>
-              </div>
-            </div>
-            <ArrowRight size={20} className="confirm-arrow" />
-            <div className="confirm-item">
-              <MapPin size={20} />
-              <div>
-                <div className="confirm-label">Ke Lokasi</div>
-                <div className="confirm-value">{destData.code}</div>
-                <div className="confirm-sub">{destData.floorName}</div>
-              </div>
-            </div>
-          </div>
-          <button className="btn btn-success btn-lg confirm-btn" onClick={handleConfirmMove}>
-            <CheckCircle size={18} /> Konfirmasi Putaway
-          </button>
-        </div>
+        </>
       )}
 
       {status === STATUS.MOVING && (
@@ -364,6 +337,14 @@ export default function PutawayPage() {
           <Loader2 size={32} className="spin" />
           <span>Memindahkan item...</span>
         </div>
+      )}
+
+      {isScannerOpen && (
+        <BarcodeScanner 
+          onClose={() => setIsScannerOpen(false)}
+          onScan={scannerMode === 'item' ? handleScanItem : handleScanDest}
+          title={scannerMode === 'item' ? "Scan Pallet / Box" : "Scan QR Lokasi Rak"}
+        />
       )}
     </div>
   );

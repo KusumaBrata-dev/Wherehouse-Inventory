@@ -276,6 +276,7 @@ scanRouter.get('/:code', async (req, res, next) => {
         id: box.id,
         code: box.code,
         name: box.name,
+        status: box.status,
         location: pathInfo,
         palletCode: box.pallet?.code,
         products: box.boxProducts.map(bp => ({
@@ -324,6 +325,7 @@ scanRouter.get('/:code', async (req, res, next) => {
         id: pallet.id,
         code: pallet.code,
         name: pallet.name,
+        status: pallet.status,
         location: pathInfo,
         products: Object.values(productMap),
         boxes: pallet.boxes.map(b => ({

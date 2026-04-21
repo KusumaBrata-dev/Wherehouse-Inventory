@@ -12,6 +12,7 @@ locationsRouter.use(authenticate);
 locationsRouter.get('/suggest', async (req, res, next) => {
   try {
     // Find levels that are not full AND not in Incoming Area
+    // Logic: Bottom-up (Level 1 first) and Start of Rack (Section 1 first)
     const levels = await prisma.rackLevel.findMany({
       include: {
         pallets: true,
@@ -21,14 +22,21 @@ locationsRouter.get('/suggest', async (req, res, next) => {
         section: {
           rack: {
             floor: {
-              name: { not: 'Incoming Area' }  // Exclude staging area from suggestions
+              name: { not: 'Incoming Area' }
             }
           }
         }
-      }
+      },
+      // Sort: Floor -> Rack -> Column (Section number) -> Level
+      orderBy: [
+        { section: { rack: { floor: { name: 'asc' } } } },
+        { section: { rack: { letter: 'asc' } } },
+        { section: { number: 'asc' } }, // Column 1 first
+        { number: 'asc' }               // Level 1 first
+      ]
     });
 
-    const suggestions = levels.filter(lvl => lvl.pallets.length < lvl.maxPallets);
+    const suggestions = levels.filter(lvl => lvl.pallets.length < (lvl.maxPallets || 20));
     if (suggestions.length === 0) {
        return res.json({ available: false, message: 'Seluruh rak penuh' });
     }
@@ -40,7 +48,7 @@ locationsRouter.get('/suggest', async (req, res, next) => {
       code: firstChoice.code,
       path: formatPath(firstChoice),
       used: firstChoice.pallets.length,
-      capacity: firstChoice.maxPallets
+      capacity: firstChoice.maxPallets || 20
     });
   } catch (err) {
     next(err);
@@ -633,77 +641,71 @@ locationsRouter.post('/move-bulk', requireAdmin, validate(moveBulkSchema), async
 });
 
 // PATCH /api/locations/pallets/:id/move
-locationsRouter.patch('/pallets/:id/move', requireAdmin, async (req, res, next) => {
+locationsRouter.patch('/pallets/:id/move', requireAdminOrPPIC, async (req, res, next) => {
   try {
     const { id } = req.params;
     const { newLevelId } = req.body;
     if (!newLevelId) return res.status(400).json({ error: 'newLevelId is required' });
 
-    const oldPallet = await prisma.pallet.findUnique({
-      where: { id: parseInt(id) },
-      include: {
-        rackLevel: { include: { section: { include: { rack: { include: { floor: true } } } } } },
-        boxes: { include: { boxProducts: true } }
-      }
-    });
-
-    if (!oldPallet) return res.status(404).json({ error: 'Pallet not found' });
-    const oldPath = formatPath(oldPallet.rackLevel);
-
-    const targetLevel = await prisma.rackLevel.findUnique({
-      where: { id: parseInt(newLevelId) },
-      include: { pallets: true }
-    });
-    if (!targetLevel) return res.status(404).json({ error: 'Target Level not found' });
-    
-    if (targetLevel.pallets.length >= targetLevel.maxPallets) {
-      return res.status(400).json({ error: `Level tujuan penuh. Kapasitas maksimum: ${targetLevel.maxPallets} pallet.` });
-    }
+    const palletId = parseInt(id);
 
     const result = await prisma.$transaction(async (tx) => {
-      const updatedPallet = await tx.pallet.update({
-        where: { id: parseInt(id) },
-        data: { rackLevelId: parseInt(newLevelId) },
+      // 1. Fetch pallet with all required context
+      const pallet = await tx.pallet.findUnique({
+        where: { id: palletId },
         include: {
-          rackLevel: {
-            include: { section: { include: { rack: { include: { floor: true } } } } }
-          }
+          rackLevel: { include: { section: { include: { rack: { include: { floor: true } } } } } },
+          boxes: { include: { boxProducts: { include: { product: true } } } }
         }
       });
 
-      const newPath = formatPath(updatedPallet.rackLevel);
-      const note = `Putaway: ${oldPallet.name} (${oldPallet.code}) | ${oldPath} → ${newPath}`;
+      if (!pallet) throw new Error(`Pallet ID ${palletId} tidak ditemukan.`);
 
-      const productMap = {};
-      oldPallet.boxes.forEach(box => {
-        box.boxProducts.forEach(bp => {
-          if (!productMap[bp.productId]) productMap[bp.productId] = { qty: 0, boxId: box.id };
-          productMap[bp.productId].qty += bp.quantity;
-        });
-      });
-
-      const fromCode = oldPallet.rackLevel.code || oldPath;
-      const toCode = updatedPallet.rackLevel.code || newPath;
-
-      for (const [pid, data] of Object.entries(productMap)) {
-        if (data.qty > 0) {
-          await tx.transaction.create({
-            data: {
-              type: 'MOVE',
-              productId: parseInt(pid),
-              quantity: data.qty,
-              boxId: data.boxId,
-              note: note,
-              fromLocationCode: fromCode,
-              toLocationCode: toCode,
-              userId: req.user.id
-            }
-          });
-        }
+      // 2. STRICTOR VALIDATIONS
+      const currentLocName = pallet.rackLevel.section.rack.floor.name;
+      
+      // Validation: Source Must be Incoming Area if move type is Putaway (implied here)
+      // Note: If we want to allow general relocation, we can skip this, 
+      // but per requirement: Putaway MUST start from INCOMING.
+      if (currentLocName !== 'Incoming Area') {
+        throw new Error(`Pallet "${pallet.code}" sudah berada di rak (${formatPath(pallet.rackLevel)}). Gunakan menu Pindah Stok untuk relokasi antar rak.`);
       }
 
-      // Mark all boxes on this pallet as STORED (putaway complete)
-      const boxIds = oldPallet.boxes.map(b => b.id);
+      // Validation: Status must be RECEIVED (not STORED or LOCKED)
+      if (pallet.status === 'LOCKED') {
+        throw new Error(`Pallet "${pallet.code}" sedang dikunci oleh proses inbound aktif.`);
+      }
+      if (pallet.status === 'STORED') {
+        throw new Error(`Pallet "${pallet.code}" sudah berstatus STORED.`);
+      }
+
+      // Validation: Target Level exists and has capacity
+      const targetLevel = await tx.rackLevel.findUnique({
+        where: { id: parseInt(newLevelId) },
+        include: { pallets: true, section: { include: { rack: { include: { floor: true } } } } }
+      });
+
+      if (!targetLevel) throw new Error('Level tujuan tidak valid.');
+      if (targetLevel.id === pallet.rackLevelId) throw new Error('Level tujuan sama dengan lokasi saat ini.');
+
+      if (targetLevel.pallets.length >= (targetLevel.maxPallets || 20)) {
+        throw new Error(`Lokasi "${targetLevel.code}" sudah penuh (${targetLevel.maxPallets} pallet).`);
+      }
+
+      // 3. EXECUTE MOVE
+      const updatedPallet = await tx.pallet.update({
+        where: { id: palletId },
+        data: { 
+          rackLevelId: targetLevel.id,
+          status: 'STORED' // Transition to STORED
+        },
+        include: {
+          rackLevel: { include: { section: { include: { rack: { include: { floor: true } } } } } }
+        }
+      });
+
+      // 4. Update all Boxes on this pallet to STORED
+      const boxIds = pallet.boxes.map(b => b.id);
       if (boxIds.length > 0) {
         await tx.box.updateMany({
           where: { id: { in: boxIds } },
@@ -711,12 +713,40 @@ locationsRouter.patch('/pallets/:id/move', requireAdmin, async (req, res, next) 
         });
       }
 
+      // 5. Create Transaction Logs for every product
+      const productMap = {};
+      pallet.boxes.forEach(box => {
+        box.boxProducts.forEach(bp => {
+          const key = `${bp.productId}::${box.id}`;
+          if (!productMap[key]) productMap[key] = { qty: 0, productId: bp.productId, boxId: box.id, sku: bp.product.sku, name: bp.product.name };
+          productMap[key].qty += bp.quantity;
+        });
+      });
+
+      const oldPath = formatPath(pallet.rackLevel);
+      const newPath = formatPath(updatedPallet.rackLevel);
+
+      for (const entry of Object.values(productMap)) {
+        await tx.transaction.create({
+          data: {
+            type: 'MOVE',
+            productId: entry.productId,
+            quantity: entry.qty,
+            boxId: entry.boxId,
+            userId: req.user.id,
+            fromLocationCode: oldPath,
+            toLocationCode: newPath,
+            note: `Putaway: Pallet ${pallet.code} | ${entry.sku} | Qty: ${entry.qty}`
+          }
+        });
+      }
+
       return updatedPallet;
     });
 
-    res.json({ message: 'Pallet berhasil dipindah dan dicatat di riwayat', pallet: result });
+    res.json({ message: 'Putaway berhasil. Pallet telah dipindahkan dan dikunci ke rak.', pallet: result });
   } catch (err) {
-    next(err);
+    res.status(400).json({ error: err.message });
   }
 });
 
@@ -777,69 +807,148 @@ locationsRouter.delete('/racks/:id', async (req, res, next) => {
 
 
 // POST /api/locations/inbound — Direct inbound (no PO required)
-// Body: { items: [{ productId, quantity, lotNumber? }], note? }
-// Automatically places items in the INCOMING area, creates a pallet+box if not exists
+// Body: { palletCode?, items: [{ productId, quantity, lotNumber? }], note? }
+// - palletCode: scan an existing INCOMING pallet, or omit to auto-create
+// - Items are merged by productId+lotNumber before persist (anti-duplicate)
 locationsRouter.post('/inbound', requireAdminOrPPIC, async (req, res, next) => {
   try {
-    const { items, note } = req.body;
+    const { items, note, palletCode } = req.body;
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'items[] wajib diisi dan tidak boleh kosong.' });
     }
 
-    // Find INCOMING floor and its first pallet
+    // ── Find INCOMING Area ─────────────────────────────────────────────────
     const incomingFloor = await prisma.floor.findFirst({
       where: { name: 'Incoming Area' },
       include: {
         racks: {
           include: {
-            sections: {
-              include: {
-                levels: { include: { pallets: { include: { boxes: true } } } }
-              }
-            }
+            sections: { include: { levels: true } }
           }
         }
       }
     });
-
     if (!incomingFloor) {
-      return res.status(500).json({ error: 'Incoming Area tidak ditemukan. Jalankan seed untuk membuatnya.' });
+      return res.status(500).json({ error: 'Incoming Area tidak ditemukan di database.' });
     }
-
-    // Find or create a pallet in INCOMING
     const firstLevel = incomingFloor.racks[0]?.sections[0]?.levels[0];
     if (!firstLevel) {
-      return res.status(500).json({ error: 'Struktur Incoming Area tidak lengkap.' });
+      return res.status(500).json({ error: 'Struktur rak Incoming Area tidak lengkap. Jalankan seed.' });
     }
 
-    const result = await prisma.$transaction(async (tx) => {
-      // Create a new "session" box in INCOMING for this inbound batch
-      const ts = Date.now();
-      const box = await tx.box.create({
-        data: {
-          code: `IN-${ts}`,
-          name: `Inbound ${new Date().toLocaleDateString('id-ID')}`,
-          status: 'RECEIVED',
-          pallet: {
-            create: {
-              code: `PLT-IN-${ts}`,
-              name: `Pallet Inbound ${new Date().toLocaleDateString('id-ID')}`,
-              rackLevelId: firstLevel.id,
-            }
-          }
+    // ── Validate or resolve Pallet ─────────────────────────────────────────
+    let existingPallet = null;
+    if (palletCode) {
+      existingPallet = await prisma.pallet.findUnique({
+        where: { code: palletCode },
+        include: {
+          rackLevel: {
+            include: { section: { include: { rack: { include: { floor: true } } } } }
+          },
+          boxes: { include: { boxProducts: true } }
         }
       });
+      if (!existingPallet) {
+        return res.status(404).json({ error: `Pallet "${palletCode}" tidak ditemukan.` });
+      }
+      // ── STRICT: Pallet MUST be in INCOMING or completely empty ─────────
+      const floorName = existingPallet.rackLevel?.section?.rack?.floor?.name;
+      const hasInventory = existingPallet.boxes.some(b => b.boxProducts.length > 0);
+      const isInIncoming = floorName === 'Incoming Area';
+      const isEmpty = !hasInventory;
+
+      if (!isInIncoming && !isEmpty) {
+        return res.status(409).json({
+          error: `Pallet "${palletCode}" sedang berada di ${floorName} dengan isi aktif. Tidak dapat digunakan untuk inbound.`
+        });
+      }
+      // Reject if already locked by another session
+      if (existingPallet.status === 'LOCKED') {
+        return res.status(423).json({
+          error: `Pallet "${palletCode}" sedang dikunci oleh sesi inbound lain. Tunggu sebentar dan coba lagi.`
+        });
+      }
+    }
+
+    // ── Aggregate items by productId + lotNumber (prevent duplicate rows) ──
+    const aggregated = {};
+    for (const item of items) {
+      const pid = parseInt(item.productId);
+      const qty = parseInt(item.quantity);
+      const lot = item.lotNumber?.trim() || '';
+      if (!pid || isNaN(qty) || qty <= 0) continue;
+      const key = `${pid}::${lot}`;
+      if (aggregated[key]) {
+        aggregated[key].quantity += qty;
+      } else {
+        aggregated[key] = { productId: pid, quantity: qty, lotNumber: lot };
+      }
+    }
+    const mergedItems = Object.values(aggregated);
+    if (mergedItems.length === 0) {
+      return res.status(400).json({ error: 'Tidak ada item valid di dalam daftar inbound.' });
+    }
+
+    // ── ATOMIC TRANSACTION ─────────────────────────────────────────────────
+    const result = await prisma.$transaction(async (tx) => {
+      const ts = Date.now();
+      let pallet;
+
+      if (existingPallet) {
+        // LOCK the pallet immediately to prevent race condition
+        pallet = await tx.pallet.update({
+          where: { id: existingPallet.id },
+          data: { status: 'LOCKED' }
+        });
+      } else {
+        // Auto-create a new pallet+box in INCOMING
+        const newBox = await tx.box.create({
+          data: {
+            code: `IN-${ts}`,
+            name: `Inbound ${new Date().toLocaleDateString('id-ID')}`,
+            status: 'RECEIVED',
+            pallet: {
+              create: {
+                code: `PLT-IN-${ts}`,
+                name: `Pallet Inbound ${new Date().toLocaleDateString('id-ID')}`,
+                rackLevelId: firstLevel.id,
+                status: 'LOCKED', // Lock immediately
+              }
+            }
+          },
+          include: { pallet: true }
+        });
+        pallet = newBox.pallet;
+      }
+
+      // Get or create a box inside this pallet for the batch
+      let box = await tx.box.findFirst({
+        where: { palletId: pallet.id, status: 'RECEIVED' },
+        include: { _count: { select: { boxProducts: true } } }
+      });
+
+      if (!box) {
+        // Check pallet capacity (maxBoxes)
+        const boxCount = await tx.box.count({ where: { palletId: pallet.id } });
+        if (boxCount >= (pallet.maxBoxes || 80)) {
+          throw new Error(`Pallet "${pallet.code}" sudah mencapai kapasitas maksimal (${pallet.maxBoxes} box).`);
+        }
+
+        box = await tx.box.create({
+          data: {
+            code: `BOX-${ts}`,
+            name: `Box Inbound ${new Date().toLocaleDateString('id-ID')}`,
+            status: 'RECEIVED',
+            palletId: pallet.id,
+          }
+        });
+      }
 
       const createdTrx = [];
+      for (const item of mergedItems) {
+        const { productId: pid, quantity: qty, lotNumber: lot } = item;
 
-      for (const item of items) {
-        const pid = parseInt(item.productId);
-        const qty = parseInt(item.quantity);
-        const lot = item.lotNumber || '';
-
-        if (!pid || !qty || qty <= 0) continue;
-
-        // Upsert BoxProduct
+        // Upsert BoxProduct (idempotent — safe to re-run)
         await tx.boxProduct.upsert({
           where: { boxId_productId_lotNumber: { boxId: box.id, productId: pid, lotNumber: lot } },
           update: { quantity: { increment: qty } },
@@ -853,7 +962,7 @@ locationsRouter.post('/inbound', requireAdminOrPPIC, async (req, res, next) => {
           create: { productId: pid, quantity: qty },
         });
 
-        // Log IN transaction
+        // Log IN transaction with full audit trail
         const trx = await tx.transaction.create({
           data: {
             type: 'IN',
@@ -862,22 +971,33 @@ locationsRouter.post('/inbound', requireAdminOrPPIC, async (req, res, next) => {
             userId: req.user.id,
             boxId: box.id,
             toLocationCode: 'INCOMING',
-            note: note || `Direct Inbound → Incoming Area`,
+            note: [
+              note,
+              `Direct Inbound → Incoming Area`,
+              `Pallet: ${pallet.code}`,
+              `Box: ${box.code}`,
+              lot ? `Lot: ${lot}` : null,
+            ].filter(Boolean).join(' | '),
           },
-          include: {
-            product: { select: { name: true, sku: true } }
-          }
+          include: { product: { select: { name: true, sku: true } } }
         });
-
         createdTrx.push(trx);
       }
 
-      return { box, transactions: createdTrx };
+      // ── UNLOCK pallet: set back to RECEIVED after success ─────────────
+      await tx.pallet.update({
+        where: { id: pallet.id },
+        data: { status: 'RECEIVED' }
+      });
+
+      return { pallet, box, transactions: createdTrx };
     });
 
     res.status(201).json({
-      message: `${result.transactions.length} produk berhasil masuk ke Incoming Area`,
+      message: `${result.transactions.length} produk berhasil dicatat ke Incoming Area`,
+      palletCode: result.pallet.code,
       boxCode: result.box.code,
+      itemCount: result.transactions.length,
       transactions: result.transactions,
     });
   } catch (err) {
